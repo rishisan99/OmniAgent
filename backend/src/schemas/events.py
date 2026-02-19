@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 EventType = Literal[
     "run_start", "plan", "task_start", "task_result",
-    "token", "block_start", "block_end",
+    "token", "block_start", "block_token", "block_end",
     "error", "run_end",
 ]
 

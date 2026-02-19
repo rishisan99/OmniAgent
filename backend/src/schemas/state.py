@@ -23,6 +23,7 @@ class AgentState(TypedDict, total=False):
 
     # user I/O
     user_text: str
+    text_query: str
     system_prompt: str
     attachments: List[Attachment]
 
@@ -33,6 +34,7 @@ class AgentState(TypedDict, total=False):
     intent: Dict[str, Any]
     plan_runtime: Dict[str, Any]
     last_image_prompt: Optional[str]
+    initial_meta_emitted: bool
     plan: Dict[str, Any]
     tasks: List[Dict[str, Any]]
     tool_outputs: Dict[str, Any]

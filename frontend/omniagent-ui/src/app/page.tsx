@@ -153,6 +153,36 @@ export default function Page() {
                 }),
             );
         }
+        if (msg.type === "block_token") {
+            const id = msg.data?.block_id;
+            if (!id) return;
+            const tok = String(msg.data?.text || "");
+            return setMessages((m) =>
+                m.map((x) => {
+                    if (x.id !== assistantId) return x;
+                    const prev = x.blocks[id];
+                    const prevPayload = (prev?.payload as { data?: { text?: string; mime?: string } } | undefined) || {};
+                    const prevData = prevPayload.data || {};
+                    const nextText = `${prevData.text || ""}${tok}`;
+                    return {
+                        ...x,
+                        blocks: {
+                            ...x.blocks,
+                            [id]: {
+                                ...(prev || { block_id: id }),
+                                payload: {
+                                    ...(prevPayload || {}),
+                                    data: { ...prevData, text: nextText, mime: "text/markdown" },
+                                },
+                            },
+                        },
+                        blockOrder: x.blockOrder.includes(id)
+                            ? x.blockOrder
+                            : [...x.blockOrder, id],
+                    };
+                }),
+            );
+        }
         if (msg.type === "error")
             setMessages((m) =>
                 m.map((x) =>
@@ -202,13 +232,31 @@ export default function Page() {
                             <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
                                 {m.role === "user" ? "You" : "Assistant"}
                             </div>
-                            {m.text && (
-                                <Blocks
-                                    blocks={{ text: { block_id: "text", title: "Text", kind: "text", payload: { data: { text: m.text, mime: "text/markdown" } } } }}
-                                    order={["text"]}
-                                />
-                            )}
-                            <Blocks blocks={m.blocks} order={m.blockOrder} />
+                            {(() => {
+                                const initialIds = m.blockOrder.filter(
+                                    (id) => m.blocks[id]?.kind === "meta_initial",
+                                );
+                                const conclusionIds = m.blockOrder.filter(
+                                    (id) => m.blocks[id]?.kind === "meta_conclusion",
+                                );
+                                const otherIds = m.blockOrder.filter((id) => {
+                                    const k = m.blocks[id]?.kind;
+                                    return k !== "meta_initial" && k !== "meta_conclusion";
+                                });
+                                return (
+                                    <>
+                                        <Blocks blocks={m.blocks} order={initialIds} />
+                                        {m.text && (
+                                            <Blocks
+                                                blocks={{ text: { block_id: "text", title: "Text", kind: "text", payload: { data: { text: m.text, mime: "text/markdown" } } } }}
+                                                order={["text"]}
+                                            />
+                                        )}
+                                        <Blocks blocks={m.blocks} order={otherIds} />
+                                        <Blocks blocks={m.blocks} order={conclusionIds} />
+                                    </>
+                                );
+                            })()}
                             {m.role === "assistant" &&
                                 m.id === activeAssistantId &&
                                 !m.text &&

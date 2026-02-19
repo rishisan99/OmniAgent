@@ -1,5 +1,6 @@
 # graph/tool_router_node.py
 from __future__ import annotations
+import re
 from typing import Any, Dict, List
 from uuid import uuid4
 
@@ -29,6 +30,39 @@ def _strip_prefixes(text: str, prefixes: List[str]) -> str:
     return s
 
 
+_NEXT_ACTION = r"(?=(?:\s*,|\s+and\s+|\s+also\s+|\s+then\s+)\s*(?:generate|create|make|explain|tell|write|summarize|what is)\b|$)"
+
+
+def _clean_clause(s: str) -> str:
+    out = (s or "").strip().strip(",.;:-")
+    out = out.strip().strip('"').strip("'").strip()
+    return out
+
+
+def _find_clause(text: str, patterns: List[str]) -> str:
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            v = _clean_clause(m.group(1))
+            if v:
+                return v
+    return ""
+
+
+def _remove_tool_clauses(text: str) -> str:
+    s = text
+    patterns = [
+        r"(?:generate|create|make)\s+(?:an?\s+)?(?:image|picture|photo)(?:\s+for|\s+of)?\s+.+?" + _NEXT_ACTION,
+        r"(?:generate|create|make)\s+audio(?:\s+for|\s+saying|\s+of)?\s+.+?" + _NEXT_ACTION,
+        r"(?:generate|create|make)\s+(?:an?\s+)?(?:pdf|document|docx?|txt|text file)(?:\s+on|\s+about|\s+for)?\s+.+?" + _NEXT_ACTION,
+    ]
+    for p in patterns:
+        s = re.sub(p, " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(and|also|then)\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip(" ,.;:-")
+    return s
+
+
 def _doc_format_from_text(text: str) -> str:
     s = (text or "").lower()
     if "pdf" in s:
@@ -49,6 +83,7 @@ def tool_router_node():
         tasks: List[Dict[str, Any]] = []
         user_text = state.get("user_text", "")
         user_l = user_text.lower()
+        text_query = _remove_tool_clauses(user_text)
         intent = state.get("intent") or {}
         runtime = state.get("plan_runtime") or {}
         linked = state.get("linked_artifact") or {}
@@ -56,10 +91,13 @@ def tool_router_node():
 
         if flags.get("needs_web"):
             src = plan.web_source or "tavily"
+            sources = [src]
+            if src == "tavily":
+                sources.append("wikipedia")
             tasks.append({
                 "id": str(uuid4())[:8], "kind": "web",
                 "query": user_text, "top_k": 5,
-                "sources": [src],
+                "sources": sources,
             })
 
         if flags.get("needs_rag") or state.get("attachments"):
@@ -83,7 +121,13 @@ def tool_router_node():
             or (bool(last_image_prompt) and any(c in user_l for c in image_edit_cues))
         )
         if flags.get("needs_image_gen") or wants_image_edit:
-            prompt = _extract_quoted(
+            prompt = _find_clause(
+                user_text,
+                [
+                    r"(?:generate|create|make)\s+(?:an?\s+)?(?:image|picture|photo)(?:\s+for|\s+of)?\s+(.+?)" + _NEXT_ACTION,
+                    r"(?:image|picture|photo)\s+of\s+(.+?)" + _NEXT_ACTION,
+                ],
+            ) or _extract_quoted(
                 _strip_prefixes(
                     user_text,
                     [
@@ -113,7 +157,13 @@ def tool_router_node():
             )
 
         if flags.get("needs_tts"):
-            text = _extract_quoted(
+            text = _find_clause(
+                user_text,
+                [
+                    r"(?:generate|create|make)\s+audio(?:\s+for|\s+saying|\s+of)?\s+(.+?)" + _NEXT_ACTION,
+                    r"(?:say|speak)\s+(.+?)" + _NEXT_ACTION,
+                ],
+            ) or _extract_quoted(
                 _strip_prefixes(
                     user_text,
                     [
@@ -141,7 +191,13 @@ def tool_router_node():
                     }
                 )
             else:
-                prompt = _extract_quoted(
+                prompt = _find_clause(
+                    user_text,
+                    [
+                        r"(?:generate|create|make)\s+(?:an?\s+)?(?:pdf|document|docx?|txt|text file)(?:\s+on|\s+about|\s+for)?\s+(.+?)" + _NEXT_ACTION,
+                        r"(?:doc|document)\s+about\s+(.+?)" + _NEXT_ACTION,
+                    ],
+                ) or _extract_quoted(
                     _strip_prefixes(
                         user_text,
                         ["generate a doc about", "create a doc about", "make a doc about", "doc about"],
@@ -161,7 +217,10 @@ def tool_router_node():
         explicit_doc_request = any(k in user_l for k in ("pdf", "document", " doc ", "docx", "text file", "txt"))
         has_doc_task = any(t.get("kind") == "doc" for t in tasks)
         if explicit_doc_request and not has_doc_task:
-            prompt = _extract_quoted(user_text) or user_text
+            prompt = _find_clause(
+                user_text,
+                [r"(?:pdf|document|docx?|txt|text file)(?:\s+on|\s+about|\s+for)?\s+(.+?)" + _NEXT_ACTION],
+            ) or _extract_quoted(user_text) or user_text
             tasks.append(
                 {
                     "id": str(uuid4())[:8],
@@ -185,5 +244,5 @@ def tool_router_node():
                 )
 
         plan.tool_tasks = tasks
-        return {"plan": plan.model_dump(), "tasks": tasks}
+        return {"plan": plan.model_dump(), "tasks": tasks, "text_query": text_query}
     return _run

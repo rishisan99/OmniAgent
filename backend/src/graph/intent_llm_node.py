@@ -1,5 +1,6 @@
 # graph/intent_llm_node.py
 from __future__ import annotations
+import os
 from typing import Any, Dict
 
 from backend.src.core.jsonx import extract_json
@@ -8,204 +9,113 @@ from backend.src.schemas.plan import RunPlan, TextPlan
 
 
 def intent_llm_node(provider: str, model: str):
-    def _fast_intent(state: Dict[str, Any]) -> Dict[str, Any] | None:
-        user = (state.get("user_text") or "").strip()
-        user_l = user.lower()
-        ctx = state.get("context_bundle") or {}
-        linked = state.get("linked_artifact") or {}
-
-        def has_any(parts: tuple[str, ...]) -> bool:
-            return any(p in user_l for p in parts)
-
-        wants_doc = has_any(("doc", "document", "pdf", "notes"))
-        wants_explain_text = has_any(
-            (
-                "tell me",
-                "explain",
-                "what is",
-                "why",
-                "how",
-                "summarize",
-                "write",
-                "story",
-                "poem",
-            )
-        )
-        wants_text = wants_explain_text
-        if wants_doc:
-            # For document requests, default to doc-only unless user explicitly asks for both.
-            wants_text = wants_explain_text and has_any(
-                (
-                    "also",
-                    "and explain",
-                    "plus explain",
-                    "with explanation",
-                    "and summarize",
-                    "plus summarize",
-                    "along with explanation",
-                )
-            )
-
-        if ctx.get("is_image_edit") and linked.get("kind") == "image":
-            plan = RunPlan(
-                mode="tools_only",
-                text=TextPlan(enabled=False),
-                flags={"needs_image_gen": True},
-                web_source=None,
-                note="fast_intent:image_edit",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "edit",
-                    "target_modality": "image",
-                    "confidence": 0.95,
-                },
-            }
-
-        if has_any(("generate", "create", "make")) and has_any(("image", "photo", "picture")):
-            plan = RunPlan(
-                mode="text_plus_tools" if wants_text else "tools_only",
-                text=TextPlan(enabled=wants_text),
-                flags={"needs_image_gen": True},
-                web_source=None,
-                note="fast_intent:image_create_with_text" if wants_text else "fast_intent:image_create",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "create" if not wants_text else "mixed",
-                    "target_modality": "image" if not wants_text else "text+image",
-                    "confidence": 0.9 if not wants_text else 0.93,
-                },
-            }
-
-        # Fast visual fallback:
-        # If user asks to generate/create/make something without explicitly saying
-        # doc/audio/web/text, treat it as image generation for UX consistency.
-        if has_any(("generate", "create", "make")) and not has_any(
-            (
-                "audio",
-                "voice",
-                "speech",
-                "tts",
-                "doc",
-                "document",
-                "pdf",
-                "web",
-                "search",
-                "latest",
-                "current",
-                "summarize",
-                "explain",
-                "code",
-                "text",
-            )
-        ):
-            plan = RunPlan(
-                mode="text_plus_tools" if wants_text else "tools_only",
-                text=TextPlan(enabled=wants_text),
-                flags={"needs_image_gen": True},
-                web_source=None,
-                note="fast_intent:image_fallback_with_text" if wants_text else "fast_intent:image_fallback",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "create" if not wants_text else "mixed",
-                    "target_modality": "image" if not wants_text else "text+image",
-                    "confidence": 0.78 if not wants_text and ctx.get("has_last_image") else (0.72 if not wants_text else 0.9),
-                },
-            }
-
-        if has_any(("generate", "create", "make")) and has_any(("audio", "voice", "speech", "tts")):
-            plan = RunPlan(
-                mode="text_plus_tools" if wants_text else "tools_only",
-                text=TextPlan(enabled=wants_text),
-                flags={"needs_tts": True},
-                web_source=None,
-                note="fast_intent:audio_create_with_text" if wants_text else "fast_intent:audio_create",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "create" if not wants_text else "mixed",
-                    "target_modality": "audio" if not wants_text else "text+audio",
-                    "confidence": 0.9 if not wants_text else 0.93,
-                },
-            }
-
-        if has_any(("generate", "create", "make")) and wants_doc:
-            plan = RunPlan(
-                mode="text_plus_tools" if wants_text else "tools_only",
-                text=TextPlan(enabled=wants_text),
-                flags={"needs_doc": True},
-                web_source=None,
-                note="fast_intent:doc_create_with_text" if wants_text else "fast_intent:doc_create",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "create" if not wants_text else "mixed",
-                    "target_modality": "doc" if not wants_text else "text+doc",
-                    "confidence": 0.9 if not wants_text else 0.93,
-                },
-            }
-        return None
-
-    def _prompt(user: str, has_files: bool) -> str:
+    def _prompt(user: str, has_files: bool, has_last_image: bool) -> str:
         return (
-            "Classify user request for an assistant.\n"
-            "Return ONLY JSON with keys:\n"
-            "mode: text_only|text_plus_tools|tools_only\n"
-            "flags: {needs_web, needs_rag, needs_doc, needs_vision, needs_tts, needs_image_gen}\n"
-            "web_source: tavily|wikipedia|arxiv|null\n"
-            "Rules: Mentioning the word 'web' is NOT a web-search request.\n"
-            "Use web only if user asks search/latest/current/cite/sources/papers.\n"
-            f"has_files={has_files}\nUSER:\n{user}\n"
+            "You are an intent classifier for a multimodal assistant.\n"
+            "Allowed capabilities: text, image, document, audio, web, rag, arxiv.\n"
+            "You MUST only use those capabilities and combinations of them.\n"
+            "Return ONLY valid JSON with exactly these keys:\n"
+            "{\n"
+            '  "mode": "text_only" | "text_plus_tools" | "tools_only",\n'
+            '  "tasks": ["text"|"image"|"document"|"audio"|"web"|"rag"|"arxiv"],\n'
+            '  "confidence": number,\n'
+            '  "intent_type": "create"|"edit"|"analyze"|"retrieve"|"chat"\n'
+            "}\n"
+            "Rules:\n"
+            "- If user asks both writing/explaining and generation, include both text and tool tasks.\n"
+            "- If user asks for document/pdf/doc/txt only, do not include text unless explicitly requested.\n"
+            "- arxiv is a subset of web retrieval; include task 'arxiv' when user asks papers/research.\n"
+            "- For follow-up image edits with previous image context, choose image task.\n"
+            "- No extra keys, no prose.\n"
+            "Examples:\n"
+            'USER: "Explain RAG in bullets and generate audio for hello"\n'
+            'JSON: {"mode":"text_plus_tools","tasks":["text","audio"],"confidence":0.93,"intent_type":"create"}\n'
+            'USER: "Generate a PDF about AI"\n'
+            'JSON: {"mode":"tools_only","tasks":["document"],"confidence":0.95,"intent_type":"create"}\n'
+            'USER: "latest AI papers from arxiv"\n'
+            'JSON: {"mode":"tools_only","tasks":["arxiv"],"confidence":0.92,"intent_type":"retrieve"}\n'
+            'USER: "write a phoenix story and also generate an image"\n'
+            'JSON: {"mode":"text_plus_tools","tasks":["text","image"],"confidence":0.94,"intent_type":"create"}\n'
+            f"has_files={has_files}; has_last_image={has_last_image}\n"
+            f"USER:\n{user}\n"
         )
 
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
-        fast = _fast_intent(state)
-        if fast:
-            return fast
-
         user = state.get("user_text", "")
+        user_l = user.lower()
         has_files = bool(state.get("attachments"))
-        prompt = _prompt(user, has_files)
+        ctx = state.get("context_bundle") or {}
+        has_last_image = bool(ctx.get("has_last_image"))
+        prompt = _prompt(user, has_files, has_last_image)
         raw = ""
         last_err: Exception | None = None
-        candidates = model_candidates(provider, model)
-        for i, candidate in enumerate(candidates):
-            llm = get_llm(provider, candidate, streaming=False, temperature=0.0)
+        intent_provider = os.getenv("INTENT_PROVIDER", "openai")
+        intent_model = os.getenv("INTENT_MODEL", "gpt-4o-mini")
+
+        candidate_pairs: list[tuple[str, str]] = [(intent_provider, intent_model)]
+        for c in model_candidates(provider, model):
+            pair = (provider, c)
+            if pair not in candidate_pairs:
+                candidate_pairs.append(pair)
+
+        for i, (p, candidate) in enumerate(candidate_pairs):
+            llm = get_llm(p, candidate, streaming=False, temperature=0.0)
             try:
                 raw = (llm.invoke(prompt).content or "").strip()
                 break
             except Exception as e:
                 last_err = e
-                if i < len(candidates) - 1 and is_not_found_error(e):
+                if i < len(candidate_pairs) - 1 and is_not_found_error(e):
                     continue
                 raise
         if not raw and last_err:
             raise last_err
+
         data = extract_json(raw)
-        web_source = data.get("web_source")
-        if isinstance(web_source, str) and web_source.strip().lower() in {"", "null", "none"}:
-            web_source = None
+
+        task_list = data.get("tasks") or []
+        tasks = [str(t).strip().lower() for t in task_list if str(t).strip()]
+        # Deterministic retrieval cues to reduce missed web/arxiv intents.
+        if any(k in user_l for k in ("latest", "recent", "news", "top ", "headlines", "current")) and "web" not in tasks and "arxiv" not in tasks:
+            tasks.append("web")
+        if any(k in user_l for k in ("arxiv", "paper", "research paper", "preprint")) and "arxiv" not in tasks:
+            tasks.append("arxiv")
+        if ("web" in tasks or "arxiv" in tasks or "rag" in tasks) and "text" not in tasks:
+            # Retrieval flows should usually produce a textual synthesis.
+            tasks.append("text")
+
+        flags = {
+            "needs_web": ("web" in tasks) or ("arxiv" in tasks),
+            "needs_rag": "rag" in tasks or has_files,
+            "needs_doc": "document" in tasks,
+            "needs_vision": False,
+            "needs_tts": "audio" in tasks,
+            "needs_image_gen": "image" in tasks,
+        }
+
+        web_source = "arxiv" if "arxiv" in tasks else ("tavily" if "web" in tasks else None)
+
+        mode = data.get("mode", "text_only")
+        if "text" in tasks and any(t in tasks for t in ("image", "document", "audio", "web", "rag", "arxiv")):
+            mode = "text_plus_tools"
+        elif "text" in tasks:
+            mode = "text_only"
+        elif tasks:
+            mode = "tools_only"
 
         plan = RunPlan(
-            mode=data.get("mode", "text_only"),
-            text=TextPlan(enabled=data.get("mode", "text_only") != "tools_only"),
-            flags=data.get("flags", {}) or {},
+            mode=mode,
+            text=TextPlan(enabled=mode != "tools_only"),
+            flags=flags,
             web_source=web_source,
-            note="micro_intent_llm",
+            note="intent_structured_fast",
         )
         return {
             "plan": plan.model_dump(),
             "intent": {
-                "intent_type": "chat",
-                "target_modality": "text",
-                "confidence": 0.6,
+                "intent_type": str(data.get("intent_type", "chat")),
+                "target_modality": "+".join(tasks) if tasks else "text",
+                "confidence": float(data.get("confidence", 0.7)),
             },
         }
     return _run

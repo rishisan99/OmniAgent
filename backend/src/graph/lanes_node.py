@@ -1,10 +1,12 @@
 # graph/lanes_node.py
 from __future__ import annotations
 import asyncio
+import os
 import re
 import time
 from typing import Any, Dict, List
 
+from backend.src.llm.factory import get_llm
 from backend.src.schemas.plan import RunPlan
 from backend.src.graph.streaming import stream_tokens
 from backend.src.agents.router import run_task
@@ -34,15 +36,20 @@ def lanes_node(provider: str, model: str):
             required = [x for x in re.split(r"\s+", subject_lock.lower()) if x and len(x) >= 3]
             return bool(required) and all(w in t for w in required[:2])
 
-        def task_title(kind: str) -> str:
+        def task_title(task: Dict[str, Any]) -> str:
+            kind = task.get("kind")
+            if kind == "web":
+                sources = task.get("sources") or []
+                if sources == ["arxiv"]:
+                    return "Results from Arxiv"
+                return "Results from Web"
             return {
-                "web": "Web Results",
                 "rag": "Document Context",
                 "image_gen": "Generated Image",
                 "tts": "Generated Audio",
                 "doc": "Generated Document",
                 "vision": "Vision Analysis",
-            }.get(kind, kind)
+            }.get(kind, str(kind))
 
         def task_phrase() -> str:
             kinds = [t.get("kind") for t in tasks]
@@ -67,17 +74,63 @@ def lanes_node(provider: str, model: str):
                 return f"{labels[0]} and {labels[1]}"
             return ", ".join(labels[:-1]) + f", and {labels[-1]}"
 
+        async def _meta_message(stage: str) -> str:
+            tasks_summary = task_phrase()
+            fallback = (
+                f"Sure, I will handle your {tasks_summary} request."
+                if stage == "initial"
+                else f"All requested outputs are ready: {tasks_summary}."
+            )
+            try:
+                p = os.getenv("INTENT_PROVIDER", "openai")
+                m = os.getenv("INTENT_MODEL", "gpt-4o-mini")
+                llm = get_llm(p, m, streaming=False, temperature=0.2)
+                prompt = (
+                    "Write exactly one short sentence for assistant UX.\n"
+                    f"Stage: {stage}\n"
+                    f"User query: {state.get('user_text','')}\n"
+                    f"Requested tools: {tasks_summary}\n"
+                    "Rules: no markdown links, no bullets, no headings, no quotes.\n"
+                    "If stage=initial, acknowledge what will be generated.\n"
+                    "If stage=conclusion, confirm outputs are ready.\n"
+                )
+                msg = llm.invoke(prompt)
+                out = (getattr(msg, "content", "") or "").strip().replace("\n", " ")
+                return out or fallback
+            except Exception:
+                return fallback
+
+        async def _stream_meta_block(block_id: str, title: str, kind: str, text: str) -> None:
+            em.emit("block_start", {"block_id": block_id, "title": title, "kind": kind})
+            acc = ""
+            parts = (text or "").split(" ")
+            for i, w in enumerate(parts):
+                tok = w + (" " if i < len(parts) - 1 else "")
+                acc += tok
+                em.emit("block_token", {"block_id": block_id, "text": tok})
+                await asyncio.sleep(0.008)
+            em.emit(
+                "block_end",
+                {
+                    "block_id": block_id,
+                    "payload": {"ok": True, "kind": kind, "data": {"text": acc.strip(), "mime": "text/markdown"}},
+                },
+            )
+
+        if tasks and not state.get("initial_meta_emitted"):
+            initial = await _meta_message("initial")
+            await _stream_meta_block("__meta_initial__", "Initial", "meta_initial", initial)
+
         for t in tasks:
-            em.emit("block_start", {"block_id": t["id"], "title": task_title(t["kind"]), "kind": t["kind"]})
+            em.emit("block_start", {"block_id": t["id"], "title": task_title(t), "kind": t["kind"]})
 
-        intro_text = ""
-        outro_text = ""
-        tools_only_turn = bool(tasks) and not plan.text.enabled
-        if tools_only_turn:
-            intro_text = f'Sure, I will generate your {task_phrase()}.\n\n'
-            em.emit("token", {"text": intro_text})
-
-        async def run_tools() -> None:
+        knowledge_tasks = {"web", "rag", "vision"}
+        needs_context_first = any(t.get("kind") in knowledge_tasks for t in tasks)
+        knowledge_task_items = [t for t in tasks if t.get("kind") in knowledge_tasks]
+        other_task_items = [t for t in tasks if t.get("kind") not in knowledge_tasks]
+        # Run knowledge and non-knowledge lanes independently so text can start
+        # as soon as retrieval context is ready (without waiting on slower image/doc/audio tasks).
+        async def run_selected(selected: List[Dict[str, Any]]) -> None:
             async def one(t):
                 task_for_run = dict(t)
                 subject_lock = task_for_run.get("subject_lock")
@@ -93,7 +146,6 @@ def lanes_node(provider: str, model: str):
                         break
                     if attempts > max_replans:
                         break
-                    # One fast replan with stronger constraints for subject stability.
                     task_for_run["prompt"] = (
                         f"{task_for_run.get('prompt', '')}\n\n"
                         f"CRITICAL CONSTRAINT: Keep the main subject as '{subject_lock}'. "
@@ -133,12 +185,12 @@ def lanes_node(provider: str, model: str):
                         "text": (d.get("text") or "")[:2000],
                     }
                 em.emit("block_end", {"block_id": t["id"], "payload": r})
-            if tasks:
-                await asyncio.gather(*[one(t) for t in tasks])
 
-        tools_job = asyncio.create_task(run_tools()) if tasks else None
-        knowledge_tasks = {"web", "rag", "vision"}
-        needs_context_first = any(t.get("kind") in knowledge_tasks for t in tasks)
+            if selected:
+                await asyncio.gather(*[one(t) for t in selected])
+
+        knowledge_job = asyncio.create_task(run_selected(knowledge_task_items)) if knowledge_task_items else None
+        other_job = asyncio.create_task(run_selected(other_task_items)) if other_task_items else None
         media_tasks = {"image_gen", "tts", "doc"}
         media_only = bool(tasks) and all(t.get("kind") in media_tasks for t in tasks)
 
@@ -166,7 +218,41 @@ def lanes_node(provider: str, model: str):
                         rows.append("RAG:\n" + "\n---\n".join(snippets))
                 if kind == "web":
                     parts = (v.get("data") or {}).get("parts", [])
-                    rows.append(f"WEB: {parts}")
+                    lines: List[str] = []
+                    for p in parts:
+                        pd = (p.get("data") or {}) if isinstance(p, dict) else {}
+                        items = pd.get("items") if isinstance(pd, dict) else None
+                        if isinstance(items, list) and items:
+                            for it in items[:8]:
+                                if not isinstance(it, dict):
+                                    continue
+                                title = str(it.get("title", "")).strip()
+                                url = str(it.get("url", "")).strip()
+                                summ = str(it.get("summary", "")).strip()
+                                pub = str(it.get("published", "")).strip()
+                                if title:
+                                    lines.append(f"- {title}")
+                                if pub:
+                                    lines.append(f"  published: {pub}")
+                                if url:
+                                    lines.append(f"  url: {url}")
+                                if summ:
+                                    lines.append(f"  summary: {summ[:300]}")
+                        elif isinstance(pd.get("results"), list):
+                            for it in pd.get("results", [])[:8]:
+                                if not isinstance(it, dict):
+                                    continue
+                                title = str(it.get("title", "")).strip()
+                                url = str(it.get("url", "")).strip()
+                                content = str(it.get("content", "")).strip()
+                                if title:
+                                    lines.append(f"- {title}")
+                                if url:
+                                    lines.append(f"  url: {url}")
+                                if content:
+                                    lines.append(f"  snippet: {content[:260]}")
+                    if lines:
+                        rows.append("WEB:\n" + "\n".join(lines))
                 if kind == "vision":
                     rows.append(f"VISION: {(v.get('data') or {}).get('text', '')}")
                 if kind == "doc":
@@ -176,42 +262,71 @@ def lanes_node(provider: str, model: str):
         llm_text = ""
         if plan.text.enabled:
             if media_only and plan.mode == "tools_only":
-                if tools_job:
-                    await tools_job
-                    tools_job = None
+                if other_job:
+                    await other_job
+                    other_job = None
+                if knowledge_job:
+                    await knowledge_job
+                    knowledge_job = None
                 llm_text = ""
             else:
-                if tools_job and needs_context_first:
-                    await tools_job
-                    tools_job = None
+                if knowledge_job and needs_context_first:
+                    await knowledge_job
+                    knowledge_job = None
                 context = tool_context_text()
                 has_media_blocks = any(t.get("kind") in {"image_gen", "tts", "doc"} for t in tasks)
+                web_tasks = [t for t in tasks if t.get("kind") == "web"]
+                has_arxiv_context = any("arxiv" in (t.get("sources") or []) for t in web_tasks)
+                has_web_context = bool(web_tasks)
                 prompt = (
                     "You are OmniAgent. Answer directly in markdown.\n"
                     "If tool outputs are present, treat them as completed results and do not say you cannot perform generation.\n"
                     "Never output internal labels/headers like CHAT_HISTORY or TOOL_CONTEXT.\n"
+                    "When a turn has both text and tool outputs, answer ONLY the user's text/explanation requests.\n"
+                    "Address all distinct textual asks in the same user message; do not skip any requested text output.\n"
+                    "If the user asks for both factual retrieval and creative writing, include both in one response with clear sections.\n"
+                    "Do NOT include sections like 'Audio Generation', 'Image Generation', 'Document Generation', or status lines about generated tools.\n"
+                    "Do NOT mention that files/audio/images were generated; the UI shows tool blocks separately.\n"
                 )
                 if has_media_blocks:
                     prompt += (
                         "If media/doc tool blocks are present, do not output markdown image/audio/doc links or placeholder URLs.\n"
                         "Do not invent URLs (especially example.com). The UI already renders generated media blocks.\n"
                     )
+                if has_arxiv_context:
+                    prompt += (
+                        "Start your response with this exact heading on the first line: ## Results from Arxiv\n"
+                        "Then provide concise answer content.\n"
+                        "If WEB context includes paper entries, list those papers with their real URLs.\n"
+                        "Do not claim 'no papers found' when paper entries are present in context.\n"
+                    )
+                elif has_web_context:
+                    prompt += (
+                        "Start your response with this exact heading on the first line: ## Results from Web\n"
+                        "Then provide concise answer content.\n"
+                    )
+                if has_web_context or has_arxiv_context:
+                    prompt += (
+                        "For links, only use URLs explicitly present in tool context/citations. Never invent or guess URLs.\n"
+                    )
                 prompt += (
                     f"{state.get('text_instructions','')}\n\n"
                     f"Conversation so far:\n{history_text()}\n\n"
                     + (f"Useful context from tools:\n{context}\n\n" if context else "")
-                    + f"User message:\n{state.get('user_text','')}\n"
+                    + f"User message:\n{state.get('text_query') or state.get('user_text','')}\n"
                 )
                 llm_text = await stream_tokens(prompt, em, provider=provider, model=model, temperature=0.2)
 
-        if tools_job:
-            await tools_job
+        if knowledge_job:
+            await knowledge_job
+        if other_job:
+            await other_job
 
-        if tools_only_turn:
-            outro_text = f"\n\nHere is your {task_phrase()}."
-            em.emit("token", {"text": outro_text})
+        if tasks:
+            conclusion = await _meta_message("conclusion")
+            await _stream_meta_block("__meta_conclusion__", "Conclusion", "meta_conclusion", conclusion)
 
-        final_text = f"{intro_text}{llm_text}{outro_text}"
+        final_text = llm_text
 
         return {
             "tool_outputs": outs,

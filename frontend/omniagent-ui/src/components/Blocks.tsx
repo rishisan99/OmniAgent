@@ -99,7 +99,7 @@ export function Blocks({
         }
     }
 
-    const ids = order?.length ? order : Object.keys(blocks);
+    const ids = order !== undefined ? order : Object.keys(blocks);
     const list = ids
         .map((id) => blocks[id])
         .filter(Boolean)
@@ -125,14 +125,24 @@ export function Blocks({
                             : b.kind === "rag"
                               ? "Document Context"
                               : b.kind === "web"
-                                ? "Web Results"
+                              ? "Web Results"
                                 : "Result";
+                const isMeta = b.kind === "meta_initial" || b.kind === "meta_conclusion";
 
                 return (
-                    <div key={b.block_id} className="border border-slate-200 rounded-xl p-3 bg-white">
-                        <div className="text-sm font-semibold">
-                            {b.title || b.block_id}
-                        </div>
+                    <div
+                        key={b.block_id}
+                        className={
+                            isMeta
+                                ? "rounded-xl px-3 py-2 bg-slate-50 border border-slate-200"
+                                : "border border-slate-200 rounded-xl p-3 bg-white"
+                        }
+                    >
+                        {!isMeta && b.kind !== "text" && (
+                            <div className="text-sm font-semibold">
+                                {b.title || b.block_id}
+                            </div>
+                        )}
 
                         {isPending && (
                             <div className="mt-2 text-sm text-slate-500">
@@ -148,12 +158,31 @@ export function Blocks({
                         )}
 
                         {url && typeof mime === "string" && mime.startsWith("image/") && (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                                src={url}
-                                alt={b.title || "image"}
-                                className="mt-2 w-full max-w-[360px] rounded-lg border border-slate-100"
-                            />
+                            <div className="mt-2">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                    src={url}
+                                    alt={b.title || "image"}
+                                    className="w-full max-w-[360px] rounded-lg border border-slate-100"
+                                />
+                                <div className="mt-2 flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => void forceDownload(url, filename)}
+                                        className="inline-block text-sm text-blue-600 underline"
+                                    >
+                                        Download
+                                    </button>
+                                    <a
+                                        href={url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-block text-sm text-blue-600 underline"
+                                    >
+                                        View
+                                    </a>
+                                </div>
+                            </div>
                         )}
 
                         {url && typeof mime === "string" && mime.startsWith("audio/") && (
@@ -187,7 +216,7 @@ export function Blocks({
                             </a>
                         )}
 
-                        {!url && !isPending && mime !== "text/markdown" && (
+                        {!url && !isPending && mime !== "text/markdown" && b.kind !== "web" && (
                             <pre className="mt-2 text-xs whitespace-pre-wrap break-words bg-slate-50 p-2 rounded">
                                 {JSON.stringify(b.payload, null, 2)}
                             </pre>
