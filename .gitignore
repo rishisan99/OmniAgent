@@ -1,0 +1,47 @@
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+wheels/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+frontend/omniagent-ui/node_modules/
+frontend/omniagent-ui/.next/
+frontend/omniagent-ui/out/
+frontend/omniagent-ui/.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / generated data
+backend/data/uploads/
+backend/data/sessions/
+
+# Misc
+*.log
