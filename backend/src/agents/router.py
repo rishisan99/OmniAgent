@@ -8,6 +8,7 @@ from backend.src.schemas.tasks import task_adapter
 
 from backend.src.agents.web_agent import run as run_web
 from backend.src.agents.rag_agent import run as run_rag
+from backend.src.agents.kb_rag_agent import run as run_kb_rag
 from backend.src.agents.text_agent import run as run_text
 
 from backend.src.agents.image_agent import run as run_image
@@ -22,6 +23,8 @@ def run_task(task: Dict[str, Any], state: Dict[str, Any], em: Emitter, provider:
         return run_web(task, state, em)
     if t.kind == "rag":
         return run_rag(task, state, em)
+    if t.kind == "kb_rag":
+        return run_kb_rag(task, state, em, provider, model)
     if t.kind == "text":
         return run_text(task, state, em, provider, model)
     if t.kind == "image_gen":

@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
+from backend.src.graph.agent_memory import push_note
+
 
 def context_node():
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -39,7 +41,12 @@ def context_node():
                 "is_image_edit": is_image_edit,
             },
             "linked_artifact": linked_artifact,
+            "agent_memory": push_note(
+                state,
+                node="context",
+                summary="Context prepared",
+                extra={"has_last_image": bool(last_image), "is_image_edit": is_image_edit},
+            ),
         }
 
     return _run
-

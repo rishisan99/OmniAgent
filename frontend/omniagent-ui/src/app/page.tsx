@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ssePost, SSEMessage } from "@/lib/sse";
 import { ModelPicker } from "@/components/ModelPicker";
 import { Uploader } from "@/components/Uploader";
@@ -34,6 +34,8 @@ export default function Page() {
     const [activeAssistantId, setActiveAssistantId] = useState<string | null>(
         null,
     );
+    const tokenBufferRef = useRef<Record<string, string>>({});
+    const flushTimerRef = useRef<number | null>(null);
 
     function onChange(p: string, m: string) {
         setProvider(p);
@@ -58,6 +60,29 @@ export default function Page() {
             JSON.stringify(messages),
         );
     }, [messages, sessionId]);
+
+    function flushTokenBuffer() {
+        const buffered = tokenBufferRef.current;
+        const ids = Object.keys(buffered);
+        if (ids.length === 0) return;
+
+        tokenBufferRef.current = {};
+        setMessages((m) =>
+            m.map((x) => {
+                const delta = buffered[x.id];
+                if (!delta) return x;
+                return { ...x, text: x.text + delta };
+            }),
+        );
+    }
+
+    function scheduleTokenFlush() {
+        if (flushTimerRef.current !== null) return;
+        flushTimerRef.current = window.setTimeout(() => {
+            flushTokenBuffer();
+            flushTimerRef.current = null;
+        }, 40);
+    }
 
     async function send() {
         if (!input.trim() || busy) return;
@@ -85,6 +110,7 @@ export default function Page() {
                 handle(msg, assistantId);
             }
         } catch (e: unknown) {
+            flushTokenBuffer();
             const err = e instanceof Error ? e.message : String(e);
             setMessages((m) =>
                 m.map((x) =>
@@ -94,21 +120,20 @@ export default function Page() {
                 ),
             );
         } finally {
+            flushTokenBuffer();
             setActiveAssistantId(null);
             setBusy(false);
         }
     }
 
     function handle(msg: SSEMessage, assistantId: string) {
-        if (msg.type === "token")
-            return setMessages((m) =>
-                m.map((x) =>
-                    x.id === assistantId
-                        ? { ...x, text: x.text + (msg.data?.text || "") }
-                        : x,
-                ),
-            );
+        if (msg.type === "token") {
+            tokenBufferRef.current[assistantId] = `${tokenBufferRef.current[assistantId] || ""}${String(msg.data?.text || "")}`;
+            scheduleTokenFlush();
+            return;
+        }
         if (msg.type === "block_start") {
+            flushTokenBuffer();
             const id = msg.data?.block_id;
             if (!id) return;
             return setMessages((m) =>
@@ -132,6 +157,7 @@ export default function Page() {
             );
         }
         if (msg.type === "block_end") {
+            flushTokenBuffer();
             const id = msg.data?.block_id;
             if (!id) return;
             return setMessages((m) =>
@@ -154,6 +180,7 @@ export default function Page() {
             );
         }
         if (msg.type === "block_token") {
+            flushTokenBuffer();
             const id = msg.data?.block_id;
             if (!id) return;
             const tok = String(msg.data?.text || "");
@@ -183,15 +210,25 @@ export default function Page() {
                 }),
             );
         }
-        if (msg.type === "error")
-            setMessages((m) =>
+        if (msg.type === "error") {
+            flushTokenBuffer();
+            return setMessages((m) =>
                 m.map((x) =>
                     x.id === assistantId
                         ? { ...x, text: `${x.text}\n[error] ${msg.data?.error || "unknown"}\n` }
                         : x,
                 ),
             );
+        }
     }
+
+    useEffect(() => {
+        return () => {
+            if (flushTimerRef.current !== null) {
+                window.clearTimeout(flushTimerRef.current);
+            }
+        };
+    }, []);
 
     return (
         <main className="mx-auto p-4 md:p-8 max-w-5xl">

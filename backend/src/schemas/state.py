@@ -40,3 +40,5 @@ class AgentState(TypedDict, total=False):
     tool_outputs: Dict[str, Any]
     final_text: Optional[str]
     text_instructions: str
+    agent_memory: Dict[str, Any]
+    response_contract: Dict[str, Any]

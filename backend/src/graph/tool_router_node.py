@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from backend.src.graph.agent_memory import push_note
 from backend.src.schemas.plan import RunPlan
 
 
@@ -76,6 +77,11 @@ def _doc_format_from_text(text: str) -> str:
     return "txt"
 
 
+def _is_news_query(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k in t for k in ("news", "headline", "headlines", "latest", "recent", "today", "update"))
+
+
 def tool_router_node():
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         plan = RunPlan.model_validate(state["plan"])
@@ -92,7 +98,7 @@ def tool_router_node():
         if flags.get("needs_web"):
             src = plan.web_source or "tavily"
             sources = [src]
-            if src == "tavily":
+            if src == "tavily" and not _is_news_query(user_text):
                 sources.append("wikipedia")
             tasks.append({
                 "id": str(uuid4())[:8], "kind": "web",
@@ -100,8 +106,10 @@ def tool_router_node():
                 "sources": sources,
             })
 
-        if flags.get("needs_rag") or state.get("attachments"):
+        if flags.get("needs_rag"):
             tasks.append({"id": str(uuid4())[:8], "kind": "rag", "query": user_text, "top_k": 5})
+        if flags.get("needs_kb_rag"):
+            tasks.append({"id": str(uuid4())[:8], "kind": "kb_rag", "query": user_text, "top_k": 6})
 
         image_edit_cues = (
             "add ",
@@ -213,8 +221,11 @@ def tool_router_node():
                     }
                 )
 
-        # Safety net: ensure explicit doc/pdf requests always route to doc generation.
-        explicit_doc_request = any(k in user_l for k in ("pdf", "document", " doc ", "docx", "text file", "txt"))
+        # Safety net: only explicit generation/export requests should route to doc generation.
+        explicit_doc_request = (
+            any(k in user_l for k in ("pdf", "document", "docx", "text file", "txt", "markdown", " md "))
+            and any(k in user_l for k in ("generate", "create", "make", "write", "export"))
+        )
         has_doc_task = any(t.get("kind") == "doc" for t in tasks)
         if explicit_doc_request and not has_doc_task:
             prompt = _find_clause(
@@ -244,5 +255,15 @@ def tool_router_node():
                 )
 
         plan.tool_tasks = tasks
-        return {"plan": plan.model_dump(), "tasks": tasks, "text_query": text_query}
+        return {
+            "plan": plan.model_dump(),
+            "tasks": tasks,
+            "text_query": text_query,
+            "agent_memory": push_note(
+                state,
+                node="tool_router",
+                summary="Tool lanes selected",
+                extra={"task_kinds": [t.get("kind") for t in tasks], "count": len(tasks)},
+            ),
+        }
     return _run

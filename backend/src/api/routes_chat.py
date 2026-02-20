@@ -27,8 +27,8 @@ class ChatIn(BaseModel):
 
 def _likely_tool_turn(text: str, has_attachments: bool) -> bool:
     t = (text or "").lower()
-    if has_attachments:
-        return True
+    if re.match(r"^\s*(hi|hello|hey|yo|sup|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$", t):
+        return False
     has_action = any(k in t for k in ("generate", "create", "make", "search", "find", "upload"))
     has_tool = any(
         k in t
@@ -44,14 +44,29 @@ def _likely_tool_turn(text: str, has_attachments: bool) -> bool:
             "web",
             "arxiv",
             "rag",
+            "paper",
+            "research",
+            "news",
+            "headline",
+            "headlines",
         )
     )
+    if has_attachments:
+        # Only show upload-analysis preamble when user asks to do something with files/tools.
+        file_reference = any(
+            k in t
+            for k in ("uploaded", "upload", "file", "document", "doc", "pdf", "image", "photo", "picture")
+        )
+        return has_action or has_tool or file_reference
     return has_action and has_tool
 
 
-async def _stream_initial_block(send, user_text: str, provider: str, model: str) -> None:
+async def _stream_initial_block(send, user_text: str, provider: str, model: str, has_attachments: bool = False) -> None:
     def find_clause(text: str, patterns: list[str]) -> str:
-        nxt = r"(?=(?:\s*,|\s*[.;:]\s*|\s+and\s+|\s+also\s+|\s+then\s+)\s*(?:generate|create|make|explain|tell|write|summarize|what is)\b|$)"
+        nxt = (
+            r"(?=(?:\s*,|\s*[.;:]\s*|\s+and\s+|\s+also\s+|\s+then\s+)\s*"
+            r"(?:generate|create|make|explain|tell|write|summarize|what is|find|search|show|get|fetch)\b|$)"
+        )
         for p in patterns:
             m = re.search(p + nxt, text, flags=re.IGNORECASE)
             if m:
@@ -79,13 +94,16 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str)
     news_clause = find_clause(
         user_text,
         [
-            r"(?:tell me|show|give me|find|search)\s+(?:about\s+)?(?:top\s+\d+\s+)?(?:latest|recent|current)\s+(.+?)",
-            r"(?:latest|recent|current)\s+(.+?news.*?)",
+            r"(?:tell me|show|give me|find|search|get|fetch)\s+(?:me\s+)?(?:about\s+)?(?:top\s+\d+\s+)?(?:latest|recent|current)\s+(?:news|headlines|updates?)\s+(?:on|about|for)?\s*(.+?)",
+            r"(?:tell me|show|give me|find|search|get|fetch)\s+(?:me\s+)?(?:recent|latest|current)\s+(.+?)(?:news|headlines|updates?)",
+            r"(?:latest|recent|current)\s+(?:news|headlines|updates?)\s+(?:on|about|for)?\s*(.+?)",
         ],
     )
     arxiv_clause = find_clause(
         user_text,
         [
+            r"(?:find|search|show|get|fetch)\s+(?:me\s+)?(?:the\s+)?(?:search\s+)?(?:paper|papers|research(?: papers?)?)\s*(?:on|about|for|:)?\s+(.+?)",
+            r"(?:from\s+)?arxiv\s*[,:\s]*(?:find|search|show|get|fetch|list)?\s*(?:the\s+)?(?:paper|papers|research(?: papers?)?)?\s*(?:on|about|for|:)?\s+(.+?)",
             r"(?:arxiv|papers?|research(?: papers?)?)\s+(?:on|about|for)?\s+(.+?)",
         ],
     )
@@ -105,13 +123,15 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str)
         parts.append(f'generate an image for "{image_clause}"')
         labels.append("image")
     if arxiv_clause:
-        parts.append(f'fetch arxiv papers on "{arxiv_clause}"')
+        parts.append(f'fetch arxiv papers for "{arxiv_clause}"')
         labels.append("arxiv research")
     elif news_clause:
         parts.append(f'fetch recent news on "{news_clause}"')
         labels.append("news summary")
 
-    if parts:
+    if has_attachments:
+        scripted = "Analyzing your uploaded file now and preparing the answer."
+    elif parts:
         # Deduplicate while preserving order.
         seen_p: set[str] = set()
         uniq_parts: list[str] = []
@@ -144,7 +164,8 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str)
 
     em_provider = os.getenv("INITIAL_PROVIDER", os.getenv("INTENT_PROVIDER", provider))
     em_model = os.getenv("INITIAL_MODEL", os.getenv("INTENT_MODEL", model))
-    delay_ms = int(os.getenv("INITIAL_TOKEN_DELAY_MS", "24"))
+    start_delay_ms = int(os.getenv("INITIAL_START_DELAY_MS", "200"))
+    delay_ms = int(os.getenv("INITIAL_TOKEN_DELAY_MS", "16"))
     prompt = (
         "Write one short sentence acknowledging requested tool outputs.\n"
         "No markdown, no bullets, no quotes.\n"
@@ -153,13 +174,16 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str)
     em_text = ""
     send({"type": "block_start", "data": {"block_id": "__meta_initial__", "title": "Initial", "kind": "meta_initial"}})
     try:
+        if start_delay_ms > 0:
+            await asyncio.sleep(start_delay_ms / 1000.0)
         if scripted:
             words = scripted.split(" ")
             for i, w in enumerate(words):
                 tok = w + (" " if i < len(words) - 1 else "")
                 em_text += tok
                 send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": tok}})
-                await asyncio.sleep(max(0, delay_ms) / 1000.0)
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000.0)
         else:
             llm = get_llm(em_provider, em_model, streaming=True, temperature=0.2)
             async for chunk in llm.astream(prompt):
@@ -210,7 +234,7 @@ async def chat_stream(inp: ChatIn):
     app = build_graph(inp.provider, inp.model)
     task = asyncio.create_task(run_graph(app, state, send, run_id=run_id, trace_id=trace_id))
     initial_task = (
-        asyncio.create_task(_stream_initial_block(send, inp.text, inp.provider, inp.model))
+        asyncio.create_task(_stream_initial_block(send, inp.text, inp.provider, inp.model, has_attachments=bool(sess.get("attachments", []))))
         if likely_tool_turn
         else None
     )

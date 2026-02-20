@@ -175,5 +175,5 @@ def doc_generate_file(session_id: str, content: str, fmt: str = "txt") -> Dict[s
         task_id="doc",
         kind="doc",
         ok=True,
-        data={"url": url, "filename": name, "mime": mime},
+        data={"url": url, "filename": name, "mime": mime, "text": plain[:12000]},
     ).model_dump()

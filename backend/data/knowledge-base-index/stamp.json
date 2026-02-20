@@ -1,0 +1,7 @@
+{
+  "count": 31,
+  "latest_mtime_ns": 1771590329525587539,
+  "root": "backend/data/docs/knowledge-base",
+  "chunk_size": 900,
+  "chunk_overlap": 150
+}

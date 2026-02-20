@@ -11,7 +11,17 @@ def ensure_index(session_id: str, attachments: List[Dict[str, Any]]) -> None:
     idx = Path("backend/data/sessions") / session_id / "rag"
     if idx.exists():
         return
-    paths = [a.get("path") for a in attachments if a.get("path")]
+    allowed_ext = {".pdf", ".txt", ".md", ".docx"}
+    paths = []
+    for a in attachments:
+        p = a.get("path")
+        if not p:
+            continue
+        if str(a.get("kind", "")).lower() != "doc":
+            continue
+        if Path(str(p)).suffix.lower() not in allowed_ext:
+            continue
+        paths.append(p)
     if not paths:
         return
     docs = load_docs(paths)

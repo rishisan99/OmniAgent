@@ -103,7 +103,7 @@ export function Blocks({
     const list = ids
         .map((id) => blocks[id])
         .filter(Boolean)
-        .filter((b) => b.kind !== "web");
+        .filter((b) => b.kind !== "web" && b.kind !== "rag" && b.kind !== "kb_rag");
 
     return (
         <div className="space-y-2">
@@ -115,6 +115,7 @@ export function Blocks({
                 const filename = typeof p.filename === "string" ? p.filename : "document";
                 const isPending = !b.payload;
                 const md = typeof p.text === "string" ? p.text : "";
+                const isVisionText = b.kind === "vision" && !!md;
                 const label =
                     b.kind === "image_gen"
                         ? "Image"
@@ -124,6 +125,8 @@ export function Blocks({
                             ? "Document"
                             : b.kind === "rag"
                               ? "Document Context"
+                              : b.kind === "kb_rag"
+                                ? "Knowledge Base"
                               : b.kind === "web"
                               ? "Web Results"
                                 : "Result";
@@ -151,6 +154,12 @@ export function Blocks({
                         )}
 
                         {b.kind !== "doc" && mime === "text/markdown" && md && (
+                            <div
+                                className="mt-2 markdown-body"
+                                dangerouslySetInnerHTML={{ __html: mdToHtml(md) }}
+                            />
+                        )}
+                        {isVisionText && (
                             <div
                                 className="mt-2 markdown-body"
                                 dangerouslySetInnerHTML={{ __html: mdToHtml(md) }}
@@ -216,7 +225,7 @@ export function Blocks({
                             </a>
                         )}
 
-                        {!url && !isPending && mime !== "text/markdown" && b.kind !== "web" && (
+                        {!url && !isPending && mime !== "text/markdown" && b.kind !== "web" && b.kind !== "vision" && (
                             <pre className="mt-2 text-xs whitespace-pre-wrap break-words bg-slate-50 p-2 rounded">
                                 {JSON.stringify(b.payload, null, 2)}
                             </pre>

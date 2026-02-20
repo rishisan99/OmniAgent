@@ -28,6 +28,12 @@ class RagTask(BaseTask):
     scope: Literal["session"] = "session"
 
 
+class KbRagTask(BaseTask):
+    kind: Literal["kb_rag"] = "kb_rag"
+    query: str
+    top_k: int = 6
+
+
 class VisionTask(BaseTask):
     kind: Literal["vision"] = "vision"
     prompt: str
@@ -56,7 +62,7 @@ class DocTask(BaseTask):
 
 
 Task = Annotated[
-    Union[TextTask, WebTask, RagTask, VisionTask, ImageGenTask, AudioTask, DocTask],
+    Union[TextTask, WebTask, RagTask, KbRagTask, VisionTask, ImageGenTask, AudioTask, DocTask],
     Field(discriminator="kind"),
 ]
 

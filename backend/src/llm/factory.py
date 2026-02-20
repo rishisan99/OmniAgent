@@ -11,9 +11,9 @@ from backend.src.llm.gemini_llm import build_gemini
 PROVIDER_FALLBACK_MODELS = {
     "openai": ("gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"),
     "anthropic": (
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku-20241022",
-        "claude-3-7-sonnet-latest",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
     ),
     "gemini": (
         "gemini-1.5-flash-002",

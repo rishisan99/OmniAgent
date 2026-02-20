@@ -1,6 +1,7 @@
 # agents/web_agent.py
 from __future__ import annotations
-from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List
 
 from backend.src.schemas.tasks import WebTask
 from backend.src.stream.emitter import Emitter
@@ -16,18 +17,23 @@ def run(task: Dict[str, Any], state: Dict[str, Any], em: Emitter) -> Dict[str, A
     outs: List[Dict[str, Any]] = []
     errs: List[str] = []
 
-    def _safe_call(name: str, fn):
-        try:
-            outs.append(fn())
-        except Exception as e:
-            errs.append(f"{name}: {e}")
-
+    calls: List[tuple[str, Callable[[], Dict[str, Any]]]] = []
     if "tavily" in t.sources:
-        _safe_call("tavily", lambda: tavily_search.invoke({"query": t.query, "top_k": t.top_k}))
+        calls.append(("tavily", lambda: tavily_search.invoke({"query": t.query, "top_k": t.top_k})))
     if "wikipedia" in t.sources:
-        _safe_call("wikipedia", lambda: wikipedia_search(t.query, top_k=min(3, t.top_k)))
+        calls.append(("wikipedia", lambda: wikipedia_search(t.query, top_k=min(3, t.top_k))))
     if "arxiv" in t.sources:
-        _safe_call("arxiv", lambda: arxiv_search.invoke({"query": t.query, "top_k": t.top_k}))
+        calls.append(("arxiv", lambda: arxiv_search.invoke({"query": t.query, "top_k": t.top_k})))
+
+    if calls:
+        with ThreadPoolExecutor(max_workers=len(calls)) as ex:
+            fut_to_name = {ex.submit(fn): name for name, fn in calls}
+            for fut in as_completed(fut_to_name):
+                name = fut_to_name[fut]
+                try:
+                    outs.append(fut.result())
+                except Exception as e:
+                    errs.append(f"{name}: {e}")
 
     ok = any(o.get("ok") for o in outs) if outs else False
     em.emit("task_result", {"task_id": t.id, "kind": t.kind, "ok": ok, "errors": errs})
