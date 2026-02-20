@@ -74,6 +74,7 @@ export function Blocks({
     order?: string[];
 }) {
     const api = process.env.NEXT_PUBLIC_API_BASE!;
+    const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS === "true";
 
     async function forceDownload(url: string, filename: string) {
         try {
@@ -103,7 +104,11 @@ export function Blocks({
     const list = ids
         .map((id) => blocks[id])
         .filter(Boolean)
-        .filter((b) => b.kind !== "web" && b.kind !== "rag" && b.kind !== "kb_rag");
+        .filter(
+            (b) =>
+                showKnowledgeBlocks
+                || (b.kind !== "web" && b.kind !== "rag" && b.kind !== "kb_rag" && b.kind !== "vision"),
+        );
 
     return (
         <div className="space-y-2">

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from backend.src.core.constants import MAX_HISTORY_MESSAGES
 from backend.src.graph.runner import build_graph, run_graph
+from backend.src.graph.v2_flow import run_graph_v2
 from backend.src.llm.factory import get_llm
 from backend.src.session.store import get_session, cleanup
 from backend.src.stream.sse import sse_gen
@@ -231,8 +232,14 @@ async def chat_stream(inp: ChatIn):
              "artifact_memory": artifact_memory,
              "initial_meta_emitted": likely_tool_turn}
 
-    app = build_graph(inp.provider, inp.model)
-    task = asyncio.create_task(run_graph(app, state, send, run_id=run_id, trace_id=trace_id))
+    use_graph_v2 = os.getenv("GRAPH_V2_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if use_graph_v2:
+        task = asyncio.create_task(
+            run_graph_v2(state, send, run_id=run_id, trace_id=trace_id, provider=inp.provider, model=inp.model)
+        )
+    else:
+        app = build_graph(inp.provider, inp.model)
+        task = asyncio.create_task(run_graph(app, state, send, run_id=run_id, trace_id=trace_id))
     initial_task = (
         asyncio.create_task(_stream_initial_block(send, inp.text, inp.provider, inp.model, has_attachments=bool(sess.get("attachments", []))))
         if likely_tool_turn

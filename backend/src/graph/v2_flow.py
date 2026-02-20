@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from typing import Any, Dict, List, Optional
+
+from backend.src.agents.router import run_task
+from backend.src.graph.agent_memory import push_note
+from backend.src.graph.context_node import context_node
+from backend.src.graph.intent_llm_node import intent_llm_node
+from backend.src.graph.planner_node import planner_node
+from backend.src.graph.role_pack_node import role_pack_node
+from backend.src.graph.streaming import stream_tokens
+from backend.src.graph.task_validate_node import task_validate_node
+from backend.src.graph.text_router_node import text_router_node
+from backend.src.graph.tool_router_node import tool_router_node
+from backend.src.llm.factory import get_llm
+from backend.src.schemas.plan import RunPlan
+from backend.src.stream.emitter import Emitter
+
+
+def _task_title(task: Dict[str, Any]) -> str:
+    kind = str(task.get("kind", ""))
+    if kind == "web":
+        sources = task.get("sources") or []
+        if sources == ["arxiv"]:
+            return "Results from Arxiv"
+        return "Results from Web"
+    return {
+        "rag": "RAG Context",
+        "kb_rag": "Knowledge Base",
+        "image_gen": "Generated Image",
+        "tts": "Generated Audio",
+        "doc": "Generated Document",
+        "vision": "Vision Analysis",
+    }.get(kind, kind)
+
+
+def _history_text(history: List[Dict[str, str]]) -> str:
+    if not history:
+        return ""
+    return "\n".join(f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in history[-12:])
+
+
+def _tool_context_text(outs: Dict[str, Any]) -> str:
+    rows: List[str] = []
+    for out in outs.values():
+        if not isinstance(out, dict) or not out.get("ok"):
+            continue
+        kind = str(out.get("kind", ""))
+        data = dict(out.get("data") or {})
+        support = str(data.get("support_summary", "")).strip()
+        if support:
+            rows.append(f"{kind.upper()} SUMMARY:\n{support}")
+        if kind in {"rag", "kb_rag"}:
+            matches = data.get("matches", []) if isinstance(data.get("matches"), list) else []
+            snippets = [str(m.get("text", "")).strip()[:380] for m in matches[:4] if isinstance(m, dict)]
+            if snippets:
+                rows.append(f"{kind.upper()} SNIPPETS:\n" + "\n---\n".join(snippets))
+        if kind == "web":
+            parts = data.get("parts", []) if isinstance(data.get("parts"), list) else []
+            urls: List[str] = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                pd = p.get("data") or {}
+                items = pd.get("items") if isinstance(pd.get("items"), list) else []
+                for it in items[:5]:
+                    if isinstance(it, dict) and it.get("url"):
+                        urls.append(str(it["url"]))
+            if urls:
+                rows.append("WEB URLS:\n" + "\n".join(f"- {u}" for u in urls[:8]))
+    return "\n\n".join(rows)
+
+
+async def _supportive_summary(
+    kind: str,
+    task: Dict[str, Any],
+    out: Dict[str, Any],
+    provider: str,
+    model: str,
+) -> str:
+    support_provider = os.getenv("SUPPORT_PROVIDER", os.getenv("PLANNER_PROVIDER", provider))
+    support_model = os.getenv("SUPPORT_MODEL", os.getenv("PLANNER_MODEL", model))
+    lane_model = {
+        "web": os.getenv("WEB_SUPPORT_MODEL", support_model),
+        "rag": os.getenv("RAG_SUPPORT_MODEL", support_model),
+        "kb_rag": os.getenv("RAG_SUPPORT_MODEL", support_model),
+        "vision": os.getenv("VISION_SUPPORT_MODEL", support_model),
+    }.get(kind, support_model)
+    llm = get_llm(support_provider, lane_model, streaming=False, temperature=0.1)
+    data = out.get("data") or {}
+    prompt = (
+        "Summarize this lane output for the main responder.\n"
+        "Return concise markdown with only grounded facts (max 6 lines).\n\n"
+        f"Lane kind: {kind}\n"
+        f"User query: {task.get('query') or task.get('prompt') or ''}\n"
+        f"Lane output data:\n{str(data)[:7000]}\n"
+    )
+    try:
+        msg = llm.invoke(prompt)
+        return (getattr(msg, "content", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _checker_payload(tasks: List[Dict[str, Any]], outs: Dict[str, Any], final_text: str) -> Dict[str, Any]:
+    requested = len(tasks)
+    completed = 0
+    failed = 0
+    for t in tasks:
+        out = outs.get(str(t.get("id")))
+        if not isinstance(out, dict):
+            continue
+        if out.get("ok"):
+            completed += 1
+        else:
+            failed += 1
+    return {
+        "requested_tasks": requested,
+        "completed_tasks": completed,
+        "failed_tasks": failed,
+        "has_main_text": bool((final_text or "").strip()),
+    }
+
+
+async def run_graph_v2(
+    state: Dict[str, Any],
+    send,
+    run_id: str,
+    trace_id: Optional[str],
+    provider: str,
+    model: str,
+) -> Dict[str, Any]:
+    em = Emitter(run_id=run_id, trace_id=trace_id, send=send)
+    em.emit("run_start", {"session_id": state.get("session_id"), "graph_version": "v2"})
+    state["emitter"] = em
+    state["agent_memory"] = push_note(state, node="initial_message", summary="Initial message node entered", extra={})
+    try:
+        for node_name, node in [
+            ("context", context_node()),
+            ("planner_intent", intent_llm_node(provider, model)),
+            ("planner_runtime", planner_node()),
+            ("text_router", text_router_node()),
+            ("tool_router", tool_router_node()),
+            ("task_validate", task_validate_node()),
+            ("role_pack", role_pack_node(provider, model)),
+        ]:
+            updates = node(state) or {}
+            if isinstance(updates, dict):
+                state.update(updates)
+            state["agent_memory"] = push_note(state, node=node_name, summary=f"{node_name} completed", extra={})
+
+        plan = RunPlan.model_validate(state.get("plan") or {"mode": "text_only", "text": {"enabled": True}})
+        tasks: List[Dict[str, Any]] = list(state.get("tasks") or [])
+        history = list(state.get("chat_history") or [])
+        response_contract = dict(state.get("response_contract") or {})
+        outs: Dict[str, Any] = {}
+        artifact_memory = dict(
+            state.get("artifact_memory")
+            or {"image": None, "audio": None, "doc": None, "lineage": {"image": [], "audio": [], "doc": []}}
+        )
+        artifact_memory.setdefault("lineage", {"image": [], "audio": [], "doc": []})
+        lineage = artifact_memory["lineage"]
+        linked_artifact = state.get("linked_artifact") or {}
+        last_image_prompt = state.get("last_image_prompt")
+
+        for t in tasks:
+            em.emit("block_start", {"block_id": t["id"], "title": _task_title(t), "kind": t.get("kind")})
+
+        knowledge_kinds = {"web", "rag", "kb_rag", "vision"}
+        knowledge_tasks = [t for t in tasks if t.get("kind") in knowledge_kinds]
+        other_tasks = [t for t in tasks if t.get("kind") not in knowledge_kinds]
+
+        async def run_one(t: Dict[str, Any]) -> None:
+            nonlocal last_image_prompt
+            try:
+                out = await asyncio.to_thread(run_task, t, state, em, provider, model)
+            except Exception as e:
+                out = {"task_id": t.get("id"), "kind": t.get("kind"), "ok": False, "error": str(e)}
+
+            kind = str(t.get("kind", ""))
+            if out.get("ok") and kind in {"web", "rag", "kb_rag", "vision"}:
+                support = await _supportive_summary(kind, t, out, provider=provider, model=model)
+                if support:
+                    data = dict(out.get("data") or {})
+                    data["support_summary"] = support
+                    data["text"] = support
+                    data["mime"] = "text/markdown"
+                    out["data"] = data
+
+            if kind == "image_gen" and out.get("ok"):
+                data = dict(out.get("data") or {})
+                prompt = str(data.get("prompt") or t.get("prompt") or "").strip()
+                if prompt:
+                    last_image_prompt = prompt
+                artifact_memory["image"] = {"id": data.get("filename"), "url": data.get("url"), "prompt": prompt}
+                parent_id = linked_artifact.get("id") if linked_artifact.get("kind") == "image" else None
+                child_id = data.get("filename")
+                if parent_id and child_id and parent_id != child_id:
+                    lineage["image"].append(
+                        {"parent_id": parent_id, "child_id": child_id, "op": "edit", "ts_ms": int(time.time() * 1000)}
+                    )
+            if kind == "tts" and out.get("ok"):
+                data = dict(out.get("data") or {})
+                artifact_memory["audio"] = {"id": data.get("filename"), "url": data.get("url"), "text": str(t.get("text", "")).strip()}
+            if kind == "doc" and out.get("ok"):
+                data = dict(out.get("data") or {})
+                artifact_memory["doc"] = {
+                    "id": data.get("filename"),
+                    "url": data.get("url"),
+                    "text": str(data.get("text", ""))[:2000],
+                }
+
+            outs[str(t.get("id"))] = out
+            em.emit("block_end", {"block_id": t.get("id"), "payload": out})
+
+        async def run_group(group: List[Dict[str, Any]]) -> None:
+            if group:
+                await asyncio.gather(*[run_one(t) for t in group])
+
+        knowledge_job = asyncio.create_task(run_group(knowledge_tasks)) if knowledge_tasks else None
+        other_job = asyncio.create_task(run_group(other_tasks)) if other_tasks else None
+
+        final_text = ""
+        if plan.text.enabled:
+            # Wait for knowledge lanes first when main text depends on retrieval context.
+            if knowledge_job:
+                await knowledge_job
+                knowledge_job = None
+            text_provider = os.getenv("TEXT_PROVIDER", provider)
+            text_model = os.getenv("TEXT_MODEL", model)
+            context = _tool_context_text(outs)
+            prompt = (
+                "You are OmniAgent. Answer directly in markdown.\n"
+                "If tool outputs are present, treat them as completed and avoid status chatter.\n"
+                "Do not invent URLs. Use only URLs present in context.\n"
+                f"{state.get('text_instructions', '')}\n\n"
+                + (
+                    "Planner contract:\n"
+                    f"Researcher brief:\n{response_contract.get('researcher_brief', '')}\n\n"
+                    f"Writer plan:\n{response_contract.get('writer_plan', '')}\n\n"
+                    f"Critic checks:\n{response_contract.get('critic_checks', '')}\n\n"
+                    if response_contract
+                    else ""
+                )
+                + f"Conversation so far:\n{_history_text(history)}\n\n"
+                + (f"Tool context:\n{context}\n\n" if context else "")
+                + f"User message:\n{state.get('text_query') or state.get('user_text', '')}\n"
+            )
+            final_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+
+        if other_job:
+            await other_job
+        if knowledge_job:
+            await knowledge_job
+
+        checker = _checker_payload(tasks, outs, final_text)
+        state["checker"] = checker
+        state["agent_memory"] = push_note(state, node="checker", summary="Checker completed", extra=checker)
+
+        if tasks:
+            em.emit(
+                "block_start",
+                {"block_id": "__meta_conclusion__", "title": "Conclusion", "kind": "meta_conclusion"},
+            )
+            em.emit(
+                "block_end",
+                {
+                    "block_id": "__meta_conclusion__",
+                    "payload": {
+                        "ok": True,
+                        "kind": "meta_conclusion",
+                        "data": {"text": "Completed. Results are shown above.", "mime": "text/markdown", "checker": checker},
+                    },
+                },
+            )
+            state["agent_memory"] = push_note(state, node="final_message", summary="Final message emitted", extra={})
+
+        em.emit("run_end", {"ok": True, "graph_version": "v2"})
+        return {
+            "final_text": final_text,
+            "tool_outputs": outs,
+            "last_image_prompt": last_image_prompt,
+            "artifact_memory": artifact_memory,
+            "checker": checker,
+            "agent_memory": state.get("agent_memory"),
+        }
+    except Exception as e:
+        em.emit("error", {"error": str(e), "graph_version": "v2"})
+        em.emit("run_end", {"ok": False, "graph_version": "v2"})
+        return {"final_text": "", "tool_outputs": {}, "error": str(e)}
