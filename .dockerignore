@@ -1,0 +1,17 @@
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+.venv
+.uv-cache
+__pycache__
+*.pyc
+*.pyo
+
+frontend/omniagent-ui/.next
+frontend/omniagent-ui/node_modules
+frontend/omniagent-ui/.env.local
+
+backend/data/uploads
+backend/data/sessions

@@ -1,11 +1,16 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ssePost, SSEMessage } from "@/lib/sse";
 import { ModelPicker } from "@/components/ModelPicker";
 import { Uploader } from "@/components/Uploader";
 import { Blocks } from "@/components/Blocks";
 
-type Block = { block_id: string; title?: string; kind?: string; payload?: unknown };
+type Block = {
+    block_id: string;
+    title?: string;
+    kind?: string;
+    payload?: unknown;
+};
 type ChatMessage = {
     id: string;
     role: "user" | "assistant";
@@ -14,17 +19,19 @@ type ChatMessage = {
     blockOrder: string[];
 };
 
+const SESSION_KEY = "omniagent_session_id";
+const SERVER_BOOT_KEY = "omniagent_server_boot_id";
+const GREETING_SEEN_KEY = "omniagent_greeting_seen";
+const GREETING_TEXT =
+    "Greetings, I'm OmniAgent, an Agentic Multi-Model System, I can generate text, images, audio and docs, maybe all at once. Try it out :)";
+
+function createSessionId(): string {
+    return `s_${Math.random().toString(16).slice(2, 10)}`;
+}
+
 export default function Page() {
     const api = process.env.NEXT_PUBLIC_API_BASE!;
-    const sessionId = useMemo(() => {
-        if (typeof window === "undefined") return "s_local";
-        const k = "omniagent_session_id";
-        const v = window.localStorage.getItem(k);
-        if (v) return v;
-        const id = `s_${Math.random().toString(16).slice(2, 10)}`;
-        window.localStorage.setItem(k, id);
-        return id;
-    }, []);
+    const [sessionId, setSessionId] = useState("");
     const [provider, setProvider] = useState("openai");
     const [model, setModel] = useState("gpt-4o-mini");
 
@@ -34,6 +41,8 @@ export default function Page() {
     const [activeAssistantId, setActiveAssistantId] = useState<string | null>(
         null,
     );
+    const [showGreeting, setShowGreeting] = useState(false);
+    const [greetingText, setGreetingText] = useState("");
     const tokenBufferRef = useRef<Record<string, string>>({});
     const flushTimerRef = useRef<number | null>(null);
 
@@ -44,7 +53,21 @@ export default function Page() {
 
     useEffect(() => {
         if (typeof window === "undefined") return;
-        const saved = window.localStorage.getItem(`omniagent_chat_${sessionId}`);
+        const v = window.localStorage.getItem(SESSION_KEY);
+        if (v) {
+            setSessionId(v);
+            return;
+        }
+        const id = createSessionId();
+        window.localStorage.setItem(SESSION_KEY, id);
+        setSessionId(id);
+    }, []);
+
+    useEffect(() => {
+        if (!sessionId || typeof window === "undefined") return;
+        const saved = window.localStorage.getItem(
+            `omniagent_chat_${sessionId}`,
+        );
         if (!saved) return;
         try {
             setMessages(JSON.parse(saved));
@@ -54,7 +77,65 @@ export default function Page() {
     }, [sessionId]);
 
     useEffect(() => {
+        if (!sessionId || typeof window === "undefined") return;
+        let cancelled = false;
+        async function syncWithServerBoot() {
+            try {
+                const r = await fetch(`${api}/api/session/meta`);
+                if (!r.ok) return;
+                const data = (await r.json()) as { server_boot_id?: string };
+                const bootId = String(data.server_boot_id || "");
+                if (!bootId || cancelled) return;
+                const prevBoot = window.localStorage.getItem(SERVER_BOOT_KEY);
+                if (prevBoot && prevBoot !== bootId) {
+                    window.localStorage.removeItem(
+                        `omniagent_chat_${sessionId}`,
+                    );
+                    setMessages([]);
+                    const nextSession = createSessionId();
+                    window.localStorage.setItem(SESSION_KEY, nextSession);
+                    window.localStorage.setItem(SERVER_BOOT_KEY, bootId);
+                    setSessionId(nextSession);
+                    return;
+                }
+                if (!prevBoot) {
+                    window.localStorage.setItem(SERVER_BOOT_KEY, bootId);
+                }
+            } catch {
+                // Ignore transient server/meta errors.
+            }
+        }
+        void syncWithServerBoot();
+        return () => {
+            cancelled = true;
+        };
+    }, [api, sessionId]);
+
+    useEffect(() => {
         if (typeof window === "undefined") return;
+        const seen = window.localStorage.getItem(GREETING_SEEN_KEY) === "1";
+        setShowGreeting(true);
+        if (seen) {
+            setGreetingText(GREETING_TEXT);
+            return;
+        }
+        setGreetingText("");
+        let idx = 0;
+        const timer = window.setInterval(() => {
+            idx += 1;
+            setGreetingText(GREETING_TEXT.slice(0, idx));
+            if (idx >= GREETING_TEXT.length) {
+                window.clearInterval(timer);
+                window.localStorage.setItem(GREETING_SEEN_KEY, "1");
+            }
+        }, 18);
+        return () => {
+            window.clearInterval(timer);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!sessionId || typeof window === "undefined") return;
         window.localStorage.setItem(
             `omniagent_chat_${sessionId}`,
             JSON.stringify(messages),
@@ -85,7 +166,7 @@ export default function Page() {
     }
 
     async function send() {
-        if (!input.trim() || busy) return;
+        if (!sessionId || !input.trim() || busy) return;
         const userText = input.trim();
         setBusy(true);
         const body = { session_id: sessionId, provider, model, text: userText };
@@ -93,7 +174,13 @@ export default function Page() {
         const assistantId = `m_${Date.now().toString(16)}_a`;
         setMessages((m) => [
             ...m,
-            { id: userId, role: "user", text: userText, blocks: {}, blockOrder: [] },
+            {
+                id: userId,
+                role: "user",
+                text: userText,
+                blocks: {},
+                blockOrder: [],
+            },
             {
                 id: assistantId,
                 role: "assistant",
@@ -126,16 +213,46 @@ export default function Page() {
         }
     }
 
+    async function clearChat() {
+        if (!sessionId || busy) return;
+        const current = sessionId;
+        try {
+            await fetch(`${api}/api/session/clear`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: current }),
+            });
+        } catch {
+            // Best effort server clear; local clear still applies.
+        }
+        if (typeof window !== "undefined") {
+            window.localStorage.removeItem(`omniagent_chat_${current}`);
+            const nextSession = createSessionId();
+            window.localStorage.setItem(SESSION_KEY, nextSession);
+            setSessionId(nextSession);
+        }
+        setMessages([]);
+        setInput("");
+        setActiveAssistantId(null);
+        tokenBufferRef.current = {};
+    }
+
     function handle(msg: SSEMessage, assistantId: string) {
         if (msg.type === "token") {
-            tokenBufferRef.current[assistantId] = `${tokenBufferRef.current[assistantId] || ""}${String(msg.data?.text || "")}`;
+            tokenBufferRef.current[assistantId] =
+                `${tokenBufferRef.current[assistantId] || ""}${String(msg.data?.text || "")}`;
             scheduleTokenFlush();
             return;
         }
         if (msg.type === "block_start") {
             flushTokenBuffer();
-            const id = msg.data?.block_id;
-            if (!id) return;
+            const rawId = msg.data?.block_id;
+            if (typeof rawId !== "string" || rawId.length === 0) return;
+            const id = rawId;
+            const rawTitle = msg.data?.title;
+            const rawKind = msg.data?.kind;
+            const title = typeof rawTitle === "string" ? rawTitle : undefined;
+            const kind = typeof rawKind === "string" ? rawKind : undefined;
             return setMessages((m) =>
                 m.map((x) => {
                     if (x.id !== assistantId) return x;
@@ -145,8 +262,8 @@ export default function Page() {
                             ...x.blocks,
                             [id]: {
                                 block_id: id,
-                                title: msg.data?.title,
-                                kind: msg.data?.kind,
+                                title,
+                                kind,
                             },
                         },
                         blockOrder: x.blockOrder.includes(id)
@@ -158,8 +275,9 @@ export default function Page() {
         }
         if (msg.type === "block_end") {
             flushTokenBuffer();
-            const id = msg.data?.block_id;
-            if (!id) return;
+            const rawId = msg.data?.block_id;
+            if (typeof rawId !== "string" || rawId.length === 0) return;
+            const id = rawId;
             return setMessages((m) =>
                 m.map((x) => {
                     if (x.id !== assistantId) return x;
@@ -181,14 +299,18 @@ export default function Page() {
         }
         if (msg.type === "block_token") {
             flushTokenBuffer();
-            const id = msg.data?.block_id;
-            if (!id) return;
+            const rawId = msg.data?.block_id;
+            if (typeof rawId !== "string" || rawId.length === 0) return;
+            const id = rawId;
             const tok = String(msg.data?.text || "");
             return setMessages((m) =>
                 m.map((x) => {
                     if (x.id !== assistantId) return x;
                     const prev = x.blocks[id];
-                    const prevPayload = (prev?.payload as { data?: { text?: string; mime?: string } } | undefined) || {};
+                    const prevPayload =
+                        (prev?.payload as
+                            | { data?: { text?: string; mime?: string } }
+                            | undefined) || {};
                     const prevData = prevPayload.data || {};
                     const nextText = `${prevData.text || ""}${tok}`;
                     return {
@@ -199,7 +321,11 @@ export default function Page() {
                                 ...(prev || { block_id: id }),
                                 payload: {
                                     ...(prevPayload || {}),
-                                    data: { ...prevData, text: nextText, mime: "text/markdown" },
+                                    data: {
+                                        ...prevData,
+                                        text: nextText,
+                                        mime: "text/markdown",
+                                    },
                                 },
                             },
                         },
@@ -215,7 +341,10 @@ export default function Page() {
             return setMessages((m) =>
                 m.map((x) =>
                     x.id === assistantId
-                        ? { ...x, text: `${x.text}\n[error] ${msg.data?.error || "unknown"}\n` }
+                        ? {
+                              ...x,
+                              text: `${x.text}\n[error] ${msg.data?.error || "unknown"}\n`,
+                          }
                         : x,
                 ),
             );
@@ -243,9 +372,26 @@ export default function Page() {
                         onChange={onChange}
                     />
                 </div>
-                <div className="flex items-center justify-between gap-3 mt-3 flex-wrap">
-                    <div className="text-sm text-slate-600">Session: {sessionId}</div>
-                    <Uploader sessionId={sessionId} onUploaded={() => {}} />
+                <div className="flex items-start justify-between gap-3 mt-3 flex-wrap">
+                    <div className="text-sm text-slate-600">
+                        Session: {sessionId || "..."}
+                    </div>
+                    <div className="flex items-start gap-2">
+                        {sessionId && (
+                            <Uploader
+                                sessionId={sessionId}
+                                onUploaded={() => {}}
+                            />
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => void clearChat()}
+                            disabled={!sessionId || busy}
+                            className="material-btn-secondary"
+                        >
+                            Clear Chat
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -253,7 +399,7 @@ export default function Page() {
                 <div className="space-y-4">
                     {messages.length === 0 && (
                         <div className="text-slate-500 text-sm">
-                            Ask for text, image, audio, docs, or PDF Q&A.
+                            {showGreeting ? greetingText : ""}
                         </div>
                     )}
 
@@ -271,26 +417,53 @@ export default function Page() {
                             </div>
                             {(() => {
                                 const initialIds = m.blockOrder.filter(
-                                    (id) => m.blocks[id]?.kind === "meta_initial",
+                                    (id) =>
+                                        m.blocks[id]?.kind === "meta_initial",
                                 );
                                 const conclusionIds = m.blockOrder.filter(
-                                    (id) => m.blocks[id]?.kind === "meta_conclusion",
+                                    (id) =>
+                                        m.blocks[id]?.kind ===
+                                        "meta_conclusion",
                                 );
                                 const otherIds = m.blockOrder.filter((id) => {
                                     const k = m.blocks[id]?.kind;
-                                    return k !== "meta_initial" && k !== "meta_conclusion";
+                                    return (
+                                        k !== "meta_initial" &&
+                                        k !== "meta_conclusion"
+                                    );
                                 });
                                 return (
                                     <>
-                                        <Blocks blocks={m.blocks} order={initialIds} />
+                                        <Blocks
+                                            blocks={m.blocks}
+                                            order={initialIds}
+                                        />
                                         {m.text && (
                                             <Blocks
-                                                blocks={{ text: { block_id: "text", title: "Text", kind: "text", payload: { data: { text: m.text, mime: "text/markdown" } } } }}
+                                                blocks={{
+                                                    text: {
+                                                        block_id: "text",
+                                                        title: "Text",
+                                                        kind: "text",
+                                                        payload: {
+                                                            data: {
+                                                                text: m.text,
+                                                                mime: "text/markdown",
+                                                            },
+                                                        },
+                                                    },
+                                                }}
                                                 order={["text"]}
                                             />
                                         )}
-                                        <Blocks blocks={m.blocks} order={otherIds} />
-                                        <Blocks blocks={m.blocks} order={conclusionIds} />
+                                        <Blocks
+                                            blocks={m.blocks}
+                                            order={otherIds}
+                                        />
+                                        <Blocks
+                                            blocks={m.blocks}
+                                            order={conclusionIds}
+                                        />
                                     </>
                                 );
                             })()}
@@ -314,17 +487,21 @@ export default function Page() {
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         placeholder="Type a message…"
+                        disabled={!sessionId}
                         onKeyDown={(e) => (e.key === "Enter" ? send() : null)}
                     />
                     <button
                         onClick={send}
-                        disabled={busy}
+                        disabled={busy || !sessionId}
                         className="material-btn"
                     >
                         {busy ? "..." : "Send"}
                     </button>
                 </div>
             </div>
+            <footer className="mt-5 text-center text-xs text-slate-500">
+                Developed by M. Santhosh Rishi © 2026
+            </footer>
         </main>
     );
 }

@@ -75,56 +75,96 @@ def _escape_pdf_text(s: str) -> str:
 
 
 def _simple_pdf_bytes(content: str) -> bytes:
+    def wrap_line(text: str, width: int) -> list[str]:
+        t = (text or "").strip()
+        if not t:
+            return [""]
+        out: list[str] = []
+        while len(t) > width:
+            cut = t.rfind(" ", 0, width + 1)
+            if cut <= 0:
+                cut = width
+            out.append(t[:cut].rstrip())
+            t = t[cut:].lstrip()
+        out.append(t)
+        return out
+
     lines: list[tuple[str, str]] = []
     for row, style in _markdown_lines(content):
         r = row.encode("latin-1", "replace").decode("latin-1")
-        width = 90 if style in {"h1", "h2"} else 95
+        width = 88 if style in {"h1", "h2"} else 94
         if not r:
             lines.append(("", "blank"))
             continue
-        while len(r) > width:
-            lines.append((r[:width], style))
-            r = r[width:]
-        lines.append((r, style))
-    content = "BT\n/F1 11 Tf\n50 800 Td\n14 TL\n"
-    for ln, style in lines[:220]:
-        if style == "blank":
-            content += "T*\n"
-            continue
-        if style == "h1":
-            content += "/F2 16 Tf\n"
-        elif style == "h2":
-            content += "/F2 14 Tf\n"
-        elif style == "h3":
-            content += "/F2 12 Tf\n"
-        else:
-            content += "/F1 11 Tf\n"
-        content += f"({_escape_pdf_text(ln)}) Tj\nT*\n"
-    content += "ET\n"
+        for part in wrap_line(r, width):
+            lines.append((part, style))
 
-    stream = content.encode("latin-1", "replace")
-    objs = []
-    objs.append("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
-    objs.append("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-    objs.append(
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] "
-        "/Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>\nendobj\n"
+    lines_per_page = 46
+    chunks: list[list[tuple[str, str]]] = []
+    for i in range(0, max(1, len(lines)), lines_per_page):
+        chunks.append(lines[i : i + lines_per_page])
+    if not chunks:
+        chunks = [[("", "blank")]]
+
+    page_count = len(chunks)
+    catalog_id = 1
+    pages_id = 2
+    first_page_id = 3
+    font1_id = first_page_id + page_count * 2
+    font2_id = font1_id + 1
+
+    objs: list[str] = [""] * (font2_id + 1)
+    objs[catalog_id] = f"{catalog_id} 0 obj\n<< /Type /Catalog /Pages {pages_id} 0 R >>\nendobj\n"
+
+    kids = []
+    for idx in range(page_count):
+        page_id = first_page_id + idx * 2
+        content_id = page_id + 1
+        kids.append(f"{page_id} 0 R")
+        chunk = chunks[idx]
+        body = "BT\n/F1 11 Tf\n50 800 Td\n14 TL\n"
+        for ln, style in chunk:
+            if style == "blank":
+                body += "T*\n"
+                continue
+            if style == "h1":
+                body += "/F2 16 Tf\n"
+            elif style == "h2":
+                body += "/F2 14 Tf\n"
+            elif style == "h3":
+                body += "/F2 12 Tf\n"
+            else:
+                body += "/F1 11 Tf\n"
+            body += f"({_escape_pdf_text(ln)}) Tj\nT*\n"
+        body += "ET\n"
+        stream = body.encode("latin-1", "replace")
+        objs[content_id] = (
+            f"{content_id} 0 obj\n<< /Length {len(stream)} >>\nstream\n"
+            f"{stream.decode('latin-1')}endstream\nendobj\n"
+        )
+        objs[page_id] = (
+            f"{page_id} 0 obj\n<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 842] "
+            f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font1_id} 0 R /F2 {font2_id} 0 R >> >> >>\nendobj\n"
+        )
+
+    objs[pages_id] = (
+        f"{pages_id} 0 obj\n<< /Type /Pages /Kids [{' '.join(kids)}] /Count {page_count} >>\nendobj\n"
     )
-    objs.append(f"4 0 obj\n<< /Length {len(stream)} >>\nstream\n{stream.decode('latin-1')}endstream\nendobj\n")
-    objs.append("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
-    objs.append("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n")
+    objs[font1_id] = f"{font1_id} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    objs[font2_id] = f"{font2_id} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n"
 
     pdf = "%PDF-1.4\n"
     offsets = [0]
-    for obj in objs:
+    for obj_id in range(1, len(objs)):
+        obj = objs[obj_id]
         offsets.append(len(pdf.encode("latin-1")))
         pdf += obj
     xref_pos = len(pdf.encode("latin-1"))
-    pdf += f"xref\n0 {len(objs)+1}\n"
+    pdf += f"xref\n0 {len(objs)}\n"
     pdf += "0000000000 65535 f \n"
     for off in offsets[1:]:
         pdf += f"{off:010d} 00000 n \n"
-    pdf += f"trailer\n<< /Size {len(objs)+1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n"
+    pdf += f"trailer\n<< /Size {len(objs)} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n"
     return pdf.encode("latin-1", "replace")
 
 

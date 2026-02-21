@@ -20,13 +20,24 @@ _QUERY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 def _entity_hint(query: str) -> str:
     q = (query or "").strip()
+    mq = re.search(r'"([^"]{2,})"', q) or re.search(r"'([^']{2,})'", q)
+    if mq:
+        return re.sub(r"\s+", " ", mq.group(1).strip())
     patterns = [
-        r"^\s*(?:who is|tell me about|about|profile of)\s+([a-zA-Z][a-zA-Z .'-]{2,})\??\s*$",
+        # Flexible conversational patterns, including polite prefixes.
+        r"(?:^|\b)(?:can you|could you|please)\s+(?:tell me about|about|who is|profile of)\s+(?:employee|employees|person)?\s*([a-zA-Z][a-zA-Z .'-]{2,})",
+        r"(?:^|\b)(?:tell me about|about|who is|profile of)\s+(?:employee|employees|person)?\s*([a-zA-Z][a-zA-Z .'-]{2,})",
+        # Explicit role mention anywhere in query.
+        r"\b(?:employee|employees|person)\s+([a-zA-Z][a-zA-Z .'-]{2,})",
     ]
     for p in patterns:
-        m = re.match(p, q, flags=re.IGNORECASE)
+        m = re.search(p, q, flags=re.IGNORECASE)
         if m:
-            return re.sub(r"\s+", " ", m.group(1).strip())
+            name = re.sub(r"\s+", " ", m.group(1).strip(" .?!,;:\"'"))
+            # Strip leading role words if capture over-includes them.
+            name = re.sub(r"^(employee|employees|person)\s+", "", name, flags=re.IGNORECASE)
+            if name:
+                return name
     return ""
 
 
@@ -107,6 +118,16 @@ def kb_search(query: str, top_k: int = 6, embedding_model: str = "text-embedding
                 strict.append((d, s))
         if strict:
             filtered_hits = strict
+        else:
+            result = ToolResult(
+                task_id="kb_rag",
+                kind="kb_rag",
+                ok=True,
+                data={"query": query, "matches": [], "entity_not_found": entity_hint},
+                citations=[],
+            ).model_dump()
+            _QUERY_CACHE[key] = {"ts": now, "result": result}
+            return result
     top_hits = filtered_hits[: max(1, int(top_k))]
 
     rows: List[Dict[str, Any]] = []

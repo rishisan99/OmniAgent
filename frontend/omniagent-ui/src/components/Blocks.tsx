@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useState } from "react";
 
 type Block = { block_id: string; title?: string; kind?: string; payload?: unknown };
 
@@ -66,6 +67,38 @@ function mdToHtml(src: string): string {
         .replace(/`(.+?)`/g, "<code>$1</code>");
 }
 
+function PendingCountdown({ kind }: { kind?: string }) {
+    const totalSec = kind === "image_gen" ? 60 : kind === "doc" ? 15 : 0;
+    const [remainingMs, setRemainingMs] = useState(totalSec * 1000);
+
+    useEffect(() => {
+        if (totalSec <= 0) return;
+        const start = Date.now();
+        const timer = window.setInterval(() => {
+            const elapsed = Date.now() - start;
+            const next = Math.max(0, totalSec * 1000 - elapsed);
+            setRemainingMs(next);
+            if (next <= 0) {
+                window.clearInterval(timer);
+            }
+        }, 50);
+        return () => {
+            window.clearInterval(timer);
+        };
+    }, [totalSec]);
+
+    const label =
+        kind === "image_gen"
+            ? "Generating Image"
+            : kind === "doc"
+                ? "Generating Document"
+                : "Generating";
+    if (totalSec <= 0) {
+        return <>{`< ${label} ... />`}</>;
+    }
+    return <>{`< ${label} ... ${Math.max(0, remainingMs / 1000).toFixed(2)} sec />`}</>;
+}
+
 export function Blocks({
     blocks,
     order,
@@ -75,6 +108,8 @@ export function Blocks({
 }) {
     const api = process.env.NEXT_PUBLIC_API_BASE!;
     const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS === "true";
+    const actionBtnClass =
+        "inline-flex items-center rounded-md border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-800 transition hover:bg-slate-200";
 
     async function forceDownload(url: string, filename: string) {
         try {
@@ -120,21 +155,6 @@ export function Blocks({
                 const filename = typeof p.filename === "string" ? p.filename : "document";
                 const isPending = !b.payload;
                 const md = typeof p.text === "string" ? p.text : "";
-                const isVisionText = b.kind === "vision" && !!md;
-                const label =
-                    b.kind === "image_gen"
-                        ? "Image"
-                        : b.kind === "tts"
-                          ? "Audio"
-                          : b.kind === "doc"
-                            ? "Document"
-                            : b.kind === "rag"
-                              ? "Document Context"
-                              : b.kind === "kb_rag"
-                                ? "Knowledge Base"
-                              : b.kind === "web"
-                              ? "Web Results"
-                                : "Result";
                 const isMeta = b.kind === "meta_initial" || b.kind === "meta_conclusion";
 
                 return (
@@ -154,7 +174,7 @@ export function Blocks({
 
                         {isPending && (
                             <div className="mt-2 text-sm text-slate-500">
-                                {`< Generating ${label} ... />`}
+                                <PendingCountdown kind={b.kind} />
                             </div>
                         )}
 
@@ -164,13 +184,6 @@ export function Blocks({
                                 dangerouslySetInnerHTML={{ __html: mdToHtml(md) }}
                             />
                         )}
-                        {isVisionText && (
-                            <div
-                                className="mt-2 markdown-body"
-                                dangerouslySetInnerHTML={{ __html: mdToHtml(md) }}
-                            />
-                        )}
-
                         {url && typeof mime === "string" && mime.startsWith("image/") && (
                             <div className="mt-2">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -183,7 +196,7 @@ export function Blocks({
                                     <button
                                         type="button"
                                         onClick={() => void forceDownload(url, filename)}
-                                        className="inline-block text-sm text-blue-600 underline"
+                                        className={actionBtnClass}
                                     >
                                         Download
                                     </button>
@@ -191,7 +204,7 @@ export function Blocks({
                                         href={url}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="inline-block text-sm text-blue-600 underline"
+                                        className={actionBtnClass}
                                     >
                                         View
                                     </a>
@@ -209,7 +222,7 @@ export function Blocks({
                                 <button
                                     type="button"
                                     onClick={() => void forceDownload(url, filename)}
-                                    className="inline-block text-sm text-blue-600 underline"
+                                    className={actionBtnClass}
                                 >
                                     Download
                                 </button>
@@ -217,7 +230,7 @@ export function Blocks({
                                     href={url}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="inline-block text-sm text-blue-600 underline"
+                                    className={actionBtnClass}
                                 >
                                     View
                                 </a>

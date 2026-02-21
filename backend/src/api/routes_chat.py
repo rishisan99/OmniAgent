@@ -13,7 +13,7 @@ from backend.src.core.constants import MAX_HISTORY_MESSAGES
 from backend.src.graph.runner import build_graph, run_graph
 from backend.src.graph.v2_flow import run_graph_v2
 from backend.src.llm.factory import get_llm
-from backend.src.session.store import get_session, cleanup
+from backend.src.session.store import get_session, cleanup, clear_session, server_boot_id
 from backend.src.stream.sse import sse_gen
 
 router = APIRouter()
@@ -26,11 +26,37 @@ class ChatIn(BaseModel):
     text: str
 
 
+class SessionClearIn(BaseModel):
+    session_id: str
+
+
 def _likely_tool_turn(text: str, has_attachments: bool) -> bool:
     t = (text or "").lower()
     if re.match(r"^\s*(hi|hello|hey|yo|sup|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$", t):
         return False
     has_action = any(k in t for k in ("generate", "create", "make", "search", "find", "upload"))
+    questionish = (
+        "?" in t
+        or t.startswith(("who ", "what ", "when ", "where ", "which ", "how ", "tell me", "did you know", "do you know"))
+    )
+    kb_retrieval_hint = any(
+        k in t
+        for k in (
+            "employee",
+            "employees",
+            "company",
+            "contract",
+            "product",
+            "knowledge base",
+            "knowledge-base",
+            "database",
+            "insurellm",
+            "carllm",
+            "homellm",
+            "markellm",
+            "rellm",
+        )
+    )
     has_tool = any(
         k in t
         for k in (
@@ -59,10 +85,18 @@ def _likely_tool_turn(text: str, has_attachments: bool) -> bool:
             for k in ("uploaded", "upload", "file", "document", "doc", "pdf", "image", "photo", "picture")
         )
         return has_action or has_tool or file_reference
+    if questionish and kb_retrieval_hint:
+        return True
     return has_action and has_tool
 
 
 async def _stream_initial_block(send, user_text: str, provider: str, model: str, has_attachments: bool = False) -> None:
+    user_l = (user_text or "").lower()
+    def _clean_db_subject(s: str) -> str:
+        out = re.sub(r"\s+", " ", (s or "").strip())
+        out = re.sub(r"^(employee|employees|person)\s+", "", out, flags=re.IGNORECASE)
+        out = out.strip(" \t\r\n.,;:!?\"'")
+        return out
     def find_clause(text: str, patterns: list[str]) -> str:
         nxt = (
             r"(?=(?:\s*,|\s*[.;:]\s*|\s+and\s+|\s+also\s+|\s+then\s+)\s*"
@@ -108,6 +142,13 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
             r"(?:arxiv|papers?|research(?: papers?)?)\s+(?:on|about|for)?\s+(.+?)",
         ],
     )
+    db_clause = find_clause(
+        user_text,
+        [
+            r"(?:did you know about|do you know about|tell me about|who is|about)\s+(.+?)",
+            r"(?:employee|employees|company|contract|product)\s+(.+?)",
+        ],
+    )
 
     parts: list[str] = []
     labels: list[str] = []
@@ -130,7 +171,15 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
         parts.append(f'fetch recent news on "{news_clause}"')
         labels.append("news summary")
 
-    if has_attachments:
+    is_db_scripted = bool(db_clause) and not any((doc_clause, audio_clause, image_clause, arxiv_clause, news_clause))
+    has_file_reference = any(
+        k in user_l
+        for k in ("uploaded", "upload", "file", "document", "doc", "pdf", "image", "photo", "picture", "attachment")
+    )
+    if is_db_scripted:
+        subject = _clean_db_subject(db_clause) or db_clause
+        scripted = f'I will search the database for records on "{subject}".'
+    elif has_attachments and has_file_reference:
         scripted = "Analyzing your uploaded file now and preparing the answer."
     elif parts:
         # Deduplicate while preserving order.
@@ -167,6 +216,9 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
     em_model = os.getenv("INITIAL_MODEL", os.getenv("INTENT_MODEL", model))
     start_delay_ms = int(os.getenv("INITIAL_START_DELAY_MS", "200"))
     delay_ms = int(os.getenv("INITIAL_TOKEN_DELAY_MS", "16"))
+    if is_db_scripted:
+        start_delay_ms = int(os.getenv("INITIAL_DB_START_DELAY_MS", "0"))
+        delay_ms = int(os.getenv("INITIAL_DB_TOKEN_DELAY_MS", "6"))
     prompt = (
         "Write one short sentence acknowledging requested tool outputs.\n"
         "No markdown, no bullets, no quotes.\n"
@@ -267,3 +319,14 @@ async def chat_stream(inp: ChatIn):
 
     asyncio.create_task(done())
     return StreamingResponse(sse_gen(q), media_type="text/event-stream")
+
+
+@router.get("/session/meta")
+def session_meta():
+    return {"server_boot_id": server_boot_id()}
+
+
+@router.post("/session/clear")
+def session_clear(inp: SessionClearIn):
+    existed = clear_session(inp.session_id)
+    return {"ok": True, "cleared": existed, "session_id": inp.session_id}

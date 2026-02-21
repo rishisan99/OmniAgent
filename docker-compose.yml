@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env.prod
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data/uploads:/app/backend/data/uploads
+      - ./backend/data/sessions:/app/backend/data/sessions
+      - ./backend/data/knowledge-base-index:/app/backend/data/knowledge-base-index
+      - ./backend/data/docs/knowledge-base:/app/backend/data/docs/knowledge-base
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/omniagent-ui/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped

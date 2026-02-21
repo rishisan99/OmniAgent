@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import re
 from typing import Any, Dict, List, Optional
 
 from backend.src.agents.router import run_task
@@ -18,6 +19,11 @@ from backend.src.graph.tool_router_node import tool_router_node
 from backend.src.llm.factory import get_llm
 from backend.src.schemas.plan import RunPlan
 from backend.src.stream.emitter import Emitter
+
+_GREETING_ONLY_RE = re.compile(
+    r"^\s*(hi|hello|hey|yo|sup|what'?s up|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
+    re.IGNORECASE,
+)
 
 
 def _task_title(task: Dict[str, Any]) -> str:
@@ -175,8 +181,22 @@ async def run_graph_v2(
 
         async def run_one(t: Dict[str, Any]) -> None:
             nonlocal last_image_prompt
+            image_timeout_sec = float(os.getenv("IMAGE_TASK_TIMEOUT_SEC", "90"))
             try:
-                out = await asyncio.to_thread(run_task, t, state, em, provider, model)
+                if str(t.get("kind", "")) == "image_gen":
+                    out = await asyncio.wait_for(
+                        asyncio.to_thread(run_task, t, state, em, provider, model),
+                        timeout=max(1.0, image_timeout_sec),
+                    )
+                else:
+                    out = await asyncio.to_thread(run_task, t, state, em, provider, model)
+            except asyncio.TimeoutError:
+                out = {
+                    "task_id": t.get("id"),
+                    "kind": t.get("kind"),
+                    "ok": False,
+                    "error": f"Image generation timed out after {int(max(1.0, image_timeout_sec))}s",
+                }
             except Exception as e:
                 out = {"task_id": t.get("id"), "kind": t.get("kind"), "ok": False, "error": str(e)}
 
@@ -232,8 +252,75 @@ async def run_graph_v2(
             text_provider = os.getenv("TEXT_PROVIDER", provider)
             text_model = os.getenv("TEXT_MODEL", model)
             context = _tool_context_text(outs)
+            query_text = str(state.get("text_query") or state.get("user_text", ""))
+            length_rules = (
+                "Length policy:\n"
+                "- Explanation/overview/definition requests: target about 1 page (roughly 350-500 words).\n"
+                "- Greetings, acknowledgements, or very simple asks: keep concise (1-4 lines).\n"
+                "- Mixed asks: allocate length proportionally and avoid filler.\n"
+            )
+            kb_no_exact_entity = False
+            kb_missing_name = ""
+            for v in outs.values():
+                if not isinstance(v, dict) or v.get("kind") != "kb_rag" or not v.get("ok"):
+                    continue
+                d = v.get("data") or {}
+                matches = d.get("matches") if isinstance(d.get("matches"), list) else []
+                if d.get("entity_not_found") and not matches:
+                    kb_no_exact_entity = True
+                    kb_missing_name = str(d.get("entity_not_found") or "").strip()
+                    break
+            if kb_no_exact_entity:
+                miss = kb_missing_name or "the requested employee"
+                final_text = await stream_tokens(
+                    (
+                        "Return exactly this markdown.\n\n"
+                        "## Knowledge Base Result\n\n"
+                        f'No exact record was found for "{miss}" in the Insurellm knowledge base.\n\n'
+                        "Try the full official name or verify spelling.\n"
+                    ),
+                    em,
+                    provider=text_provider,
+                    model=text_model,
+                    temperature=0.0,
+                )
+                if other_job:
+                    await other_job
+                if knowledge_job:
+                    await knowledge_job
+                checker = _checker_payload(tasks, outs, final_text)
+                state["checker"] = checker
+                state["agent_memory"] = push_note(state, node="checker", summary="Checker completed", extra=checker)
+                if tasks:
+                    em.emit(
+                        "block_start",
+                        {"block_id": "__meta_conclusion__", "title": "Conclusion", "kind": "meta_conclusion"},
+                    )
+                    em.emit(
+                        "block_end",
+                        {
+                            "block_id": "__meta_conclusion__",
+                            "payload": {
+                                "ok": True,
+                                "kind": "meta_conclusion",
+                                "data": {"text": "Completed. Results are shown above.", "mime": "text/markdown", "checker": checker},
+                            },
+                        },
+                    )
+                em.emit("run_end", {"ok": True, "graph_version": "v2"})
+                return {
+                    "final_text": final_text,
+                    "tool_outputs": outs,
+                    "last_image_prompt": last_image_prompt,
+                    "artifact_memory": artifact_memory,
+                    "checker": checker,
+                    "agent_memory": state.get("agent_memory"),
+                }
             prompt = (
                 "You are OmniAgent. Answer directly in markdown.\n"
+                f"{length_rules}"
+                "Prefer short headings and concise bullets.\n"
+                "Avoid long paragraphs (>3 lines each).\n"
                 "If tool outputs are present, treat them as completed and avoid status chatter.\n"
                 "Do not invent URLs. Use only URLs present in context.\n"
                 f"{state.get('text_instructions', '')}\n\n"
@@ -247,9 +334,31 @@ async def run_graph_v2(
                 )
                 + f"Conversation so far:\n{_history_text(history)}\n\n"
                 + (f"Tool context:\n{context}\n\n" if context else "")
-                + f"User message:\n{state.get('text_query') or state.get('user_text', '')}\n"
+                + (
+                    "KB_RAG indicates no exact entity match for the requested name.\n"
+                    "State clearly that no exact record was found in the knowledge base and do not speculate.\n\n"
+                    if kb_no_exact_entity
+                    else ""
+                )
+                + f"User message:\n{query_text}\n"
             )
             final_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+            if _GREETING_ONLY_RE.match(query_text):
+                word_count = len((final_text or "").strip().split())
+                if word_count > 20:
+                    llm = get_llm(text_provider, text_model, streaming=False, temperature=0.1)
+                    short = ""
+                    try:
+                        msg = llm.invoke(
+                            "Rewrite the following as exactly one short friendly sentence "
+                            "(max 18 words), no headings, no bullets, no markdown:\n\n"
+                            f"{final_text}"
+                        )
+                        short = (getattr(msg, "content", "") or "").strip()
+                    except Exception:
+                        short = ""
+                    if short:
+                        final_text = short
 
         if other_job:
             await other_job

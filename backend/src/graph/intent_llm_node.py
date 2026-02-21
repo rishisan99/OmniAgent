@@ -190,6 +190,56 @@ def intent_llm_node(provider: str, model: str):
         task_list = data.get("tasks") or []
         tasks = [str(t).strip().lower() for t in task_list if str(t).strip()]
 
+        # Deterministic image-only fast path:
+        # If user explicitly asks to generate/create an image and does not ask
+        # for explanation text or other tool modalities, suppress text lane.
+        explicit_image_gen = bool(
+            re.search(
+                r"(?:generate|create|make)\s+(?:an?\s+)?(?:image|picture|photo)\b|(?:image|picture|photo)\s+of\b",
+                user_l,
+            )
+        )
+        explicit_text_ask = any(
+            k in user_l
+            for k in (
+                "explain",
+                "describe",
+                "tell me",
+                "write",
+                "story",
+                "summarize",
+                "summary",
+                "in detail",
+                "what is",
+                "what's",
+            )
+        )
+        non_image_tool_ask = any(
+            k in user_l
+            for k in (
+                "audio",
+                "voice",
+                "tts",
+                "pdf",
+                "document",
+                "docx",
+                "text file",
+                "txt",
+                "web",
+                "arxiv",
+                "paper",
+                "research",
+                "news",
+                "headline",
+                "headlines",
+                "rag",
+            )
+        )
+        if explicit_image_gen and not explicit_text_ask and not non_image_tool_ask:
+            tasks = [t for t in tasks if t == "image"]
+            if "image" not in tasks:
+                tasks.append("image")
+
         # If a document is already uploaded and user is asking a question about it,
         # route to QA (text + retrieval) instead of document generation/extraction.
         has_doc_context = has_doc_attachment or has_memory_doc_text

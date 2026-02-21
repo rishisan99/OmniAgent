@@ -9,7 +9,6 @@ from backend.src.schemas.plan import RunPlan
 def text_router_node():
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         plan = RunPlan.model_validate(state["plan"])
-        user = (state.get("user_text") or "").lower()
 
         if not plan.text.enabled:
             return {
@@ -23,14 +22,13 @@ def text_router_node():
                 ),
             }
 
-        if any(k in user for k in ("bullet", "5 points", "points", "bullets")):
-            plan.text.style = "bullet"
-        elif any(k in user for k in ("detail", "deep", "explain")):
-            plan.text.style = "detailed"
-        else:
-            plan.text.style = "direct"
-
-        plan.text.instruction = f"Answer in style={plan.text.style}."
+        plan.text.instruction = (
+            "Length policy:\n"
+            "- For explanation/overview/definition requests, provide about 1 page (roughly 350-500 words).\n"
+            "- For greetings, acknowledgements, or very simple asks, keep it concise (1-4 lines).\n"
+            "- For mixed asks, allocate length proportionally and avoid unnecessary verbosity.\n"
+            "Format with clear headings and concise bullets when useful."
+        )
         return {
             "plan": plan.model_dump(),
             "text_instructions": plan.text.instruction,

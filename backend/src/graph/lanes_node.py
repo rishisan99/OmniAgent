@@ -12,6 +12,11 @@ from backend.src.schemas.plan import RunPlan
 from backend.src.graph.streaming import stream_tokens
 from backend.src.agents.router import run_task
 
+_GREETING_ONLY_RE = re.compile(
+    r"^\s*(hi|hello|hey|yo|sup|what'?s up|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
+    re.IGNORECASE,
+)
+
 
 def lanes_node(provider: str, model: str):
     async def _run(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -147,12 +152,19 @@ def lanes_node(provider: str, model: str):
                 task_for_run = dict(t)
                 subject_lock = task_for_run.get("subject_lock")
                 max_replans = int(runtime.get("max_replans", 0))
+                image_timeout_sec = float(os.getenv("IMAGE_TASK_TIMEOUT_SEC", "90"))
                 attempts = 0
                 r: Dict[str, Any] = {"task_id": t["id"], "kind": t.get("kind"), "ok": False, "error": "Unknown error"}
                 try:
                     while True:
                         attempts += 1
-                        r = await asyncio.to_thread(run_task, task_for_run, state, em, provider, model)
+                        if task_for_run.get("kind") == "image_gen":
+                            r = await asyncio.wait_for(
+                                asyncio.to_thread(run_task, task_for_run, state, em, provider, model),
+                                timeout=max(1.0, image_timeout_sec),
+                            )
+                        else:
+                            r = await asyncio.to_thread(run_task, task_for_run, state, em, provider, model)
                         if task_for_run.get("kind") != "image_gen":
                             break
                         if _subject_lock_ok(task_for_run.get("prompt", ""), subject_lock):
@@ -164,6 +176,13 @@ def lanes_node(provider: str, model: str):
                             f"CRITICAL CONSTRAINT: Keep the main subject as '{subject_lock}'. "
                             "Do not replace it with any other animal or object."
                         )
+                except asyncio.TimeoutError:
+                    r = {
+                        "task_id": t["id"],
+                        "kind": t.get("kind"),
+                        "ok": False,
+                        "error": f"Image generation timed out after {int(max(1.0, image_timeout_sec))}s",
+                    }
                 except Exception as e:
                     r = {"task_id": t["id"], "kind": t.get("kind"), "ok": False, "error": str(e)}
                 finally:
@@ -460,15 +479,44 @@ def lanes_node(provider: str, model: str):
                 arxiv_only_web = bool(web_tasks) and all((t.get("sources") or []) == ["arxiv"] for t in web_tasks)
                 arxiv_items = arxiv_items_from_outs() if has_arxiv_context else []
                 kb_citations = kb_unique_citations() if has_kb_context else []
+                kb_no_exact_entity = False
+                kb_missing_name = ""
+                if has_kb_context:
+                    for v in outs.values():
+                        if v.get("kind") != "kb_rag" or not v.get("ok"):
+                            continue
+                        d = v.get("data") or {}
+                        matches = d.get("matches") if isinstance(d.get("matches"), list) else []
+                        if d.get("entity_not_found") and not matches:
+                            kb_no_exact_entity = True
+                            kb_missing_name = str(d.get("entity_not_found") or "").strip()
+                            break
                 if arxiv_only_web and arxiv_items and not has_media_blocks:
                     llm_text = await emit_text_tokens(render_arxiv_markdown(arxiv_items))
+                elif kb_no_exact_entity:
+                    miss = kb_missing_name or "the requested employee"
+                    not_found_text = (
+                        "## Knowledge Base Result\n\n"
+                        f'No exact record was found for "{miss}" in the Insurellm knowledge base.\n\n'
+                        "Try the full official name or verify spelling."
+                    )
+                    llm_text = await emit_text_tokens(not_found_text)
                 else:
                     query_text = state.get("text_query") or state.get("user_text", "")
+                    length_rules = (
+                        "Length policy:\n"
+                        "- Explanation/overview/definition requests: target about 1 page (roughly 350-500 words).\n"
+                        "- Greetings, acknowledgements, or very simple asks: keep concise (1-4 lines).\n"
+                        "- Mixed asks: allocate length proportionally and avoid filler.\n"
+                    )
                     ev_rows = ranked_evidence(query_text)
                     ev_text = evidence_text(ev_rows)
                     conflicts = conflict_signals(query_text, ev_rows)
                     prompt = (
                         "You are OmniAgent. Answer directly in markdown.\n"
+                        f"{length_rules}"
+                        "Use short headings and compact bullets where useful.\n"
+                        "Avoid long paragraphs (>3 lines each).\n"
                         "If tool outputs are present, treat them as completed results and do not say you cannot perform generation.\n"
                         "Never output internal labels/headers like CHAT_HISTORY or TOOL_CONTEXT.\n"
                         "When a turn has both text and tool outputs, answer ONLY the user's text/explanation requests.\n"
@@ -514,6 +562,12 @@ def lanes_node(provider: str, model: str):
                             "Do not copy large raw chunks verbatim; synthesize a concise answer.\n"
                             "Do NOT include a Sources/Citations section in the answer.\n"
                         )
+                    if kb_no_exact_entity:
+                        prompt += (
+                            "KB_RAG indicates no exact entity match for the requested name.\n"
+                            "Respond that no record was found for that exact entity in the knowledge base.\n"
+                            "Do not infer role, title, or contributions from other people.\n"
+                        )
                     if conflicts:
                         prompt += "Conflict alerts:\n" + "\n".join(f"- {c}" for c in conflicts) + "\n"
                     prompt += (
@@ -549,6 +603,24 @@ def lanes_node(provider: str, model: str):
                         llm_text = await emit_text_tokens(reviewed)
                     else:
                         llm_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+                    # Soft guard: if greeting-only prompt still produced a long answer,
+                    # rewrite once into a compact single sentence using the same LLM.
+                    if _GREETING_ONLY_RE.match(str(query_text or "")):
+                        word_count = len((llm_text or "").strip().split())
+                        if word_count > 20:
+                            llm = get_llm(text_provider, text_model, streaming=False, temperature=0.1)
+                            short = ""
+                            try:
+                                msg = llm.invoke(
+                                    "Rewrite the following as exactly one short friendly sentence "
+                                    "(max 18 words), no headings, no bullets, no markdown:\n\n"
+                                    f"{llm_text}"
+                                )
+                                short = (getattr(msg, "content", "") or "").strip()
+                            except Exception:
+                                short = ""
+                            if short:
+                                llm_text = short
                     if has_kb_context and kb_citations:
                         lines = ["", "", "## Sources", ""]
                         for i, c in enumerate(kb_citations, 1):
