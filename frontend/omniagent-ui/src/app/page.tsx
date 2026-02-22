@@ -19,6 +19,14 @@ type ChatMessage = {
     blocks: Record<string, Block>;
     blockOrder: string[];
 };
+type Artifact = { id?: string; url?: string; text?: string };
+type SessionStateResp = {
+    artifact_memory?: {
+        image?: Artifact | null;
+        audio?: Artifact | null;
+        doc?: Artifact | null;
+    };
+};
 
 const SESSION_KEY = "omniagent_session_id";
 const SERVER_BOOT_KEY = "omniagent_server_boot_id";
@@ -28,6 +36,20 @@ const GREETING_TEXT =
 
 function createSessionId(): string {
     return `s_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function mimeFromUrl(url: string, fallback: string): string {
+    const u = (url || "").toLowerCase();
+    if (u.endsWith(".png")) return "image/png";
+    if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
+    if (u.endsWith(".webp")) return "image/webp";
+    if (u.endsWith(".gif")) return "image/gif";
+    if (u.endsWith(".mp3")) return "audio/mpeg";
+    if (u.endsWith(".wav")) return "audio/wav";
+    if (u.endsWith(".m4a")) return "audio/mp4";
+    if (u.endsWith(".pdf")) return "application/pdf";
+    if (u.endsWith(".md") || u.endsWith(".txt")) return "text/markdown";
+    return fallback;
 }
 
 export default function Page() {
@@ -165,6 +187,76 @@ export default function Page() {
         }, 40);
     }
 
+    async function reconcilePendingMediaBlocks(assistantId: string) {
+        if (!sessionId) return;
+        try {
+            const r = await fetch(
+                `${apiUrl("/api/session/state")}?session_id=${encodeURIComponent(sessionId)}`,
+            );
+            if (!r.ok) return;
+            const data = (await r.json()) as SessionStateResp;
+            const mem = data.artifact_memory || {};
+            const image = mem.image || null;
+            const audio = mem.audio || null;
+            const doc = mem.doc || null;
+
+            setMessages((all) =>
+                all.map((m) => {
+                    if (m.id !== assistantId) return m;
+                    const nextBlocks = { ...m.blocks };
+                    for (const id of m.blockOrder) {
+                        const b = nextBlocks[id];
+                        if (!b || b.payload) continue;
+                        if (b.kind === "image_gen" && image?.url) {
+                            nextBlocks[id] = {
+                                ...b,
+                                payload: {
+                                    ok: true,
+                                    kind: "image_gen",
+                                    data: {
+                                        url: image.url,
+                                        filename: image.id || "image.png",
+                                        mime: mimeFromUrl(image.url, "image/png"),
+                                    },
+                                },
+                            };
+                        } else if (b.kind === "tts" && audio?.url) {
+                            nextBlocks[id] = {
+                                ...b,
+                                payload: {
+                                    ok: true,
+                                    kind: "tts",
+                                    data: {
+                                        url: audio.url,
+                                        filename: audio.id || "audio.mp3",
+                                        mime: mimeFromUrl(audio.url, "audio/mpeg"),
+                                    },
+                                },
+                            };
+                        } else if (b.kind === "doc" && doc?.url) {
+                            nextBlocks[id] = {
+                                ...b,
+                                payload: {
+                                    ok: true,
+                                    kind: "doc",
+                                    data: {
+                                        url: doc.url,
+                                        filename: doc.id || "document",
+                                        text: doc.text || "",
+                                        mime: mimeFromUrl(doc.url, "text/markdown"),
+                                    },
+                                },
+                            };
+                        }
+                    }
+                    return { ...m, blocks: nextBlocks };
+                }),
+            );
+        } catch {
+            // Best-effort reconciliation if stream dropped block_end events.
+        }
+    }
+
     async function send() {
         if (!sessionId || !input.trim() || busy) return;
         const userText = input.trim();
@@ -208,6 +300,7 @@ export default function Page() {
             );
         } finally {
             flushTokenBuffer();
+            await reconcilePendingMediaBlocks(assistantId);
             setActiveAssistantId(null);
             setBusy(false);
         }

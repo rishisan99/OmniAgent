@@ -351,6 +351,16 @@ def session_meta():
     return {"server_boot_id": server_boot_id()}
 
 
+@router.get("/session/state")
+def session_state(session_id: str):
+    sess = get_session(session_id)
+    return {
+        "session_id": session_id,
+        "artifact_memory": sess.get("artifact_memory") or {},
+        "attachments": list(sess.get("attachments", [])),
+    }
+
+
 @router.post("/session/clear")
 def session_clear(inp: SessionClearIn):
     existed = clear_session(inp.session_id)
