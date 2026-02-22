@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from backend.src.agents.router import run_task
+from backend.src.core.logging import get_logger
 from backend.src.graph.agent_memory import push_note
 from backend.src.graph.context_node import context_node
 from backend.src.graph.intent_llm_node import intent_llm_node
@@ -24,6 +25,7 @@ _GREETING_ONLY_RE = re.compile(
     r"^\s*(hi|hello|hey|yo|sup|what'?s up|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
     re.IGNORECASE,
 )
+logger = get_logger("omniagent.graph.v2")
 
 
 def _task_title(task: Dict[str, Any]) -> str:
@@ -139,6 +141,14 @@ async def run_graph_v2(
     provider: str,
     model: str,
 ) -> Dict[str, Any]:
+    logger.info(
+        "NODE_CALL node=run_graph_v2 run_id=%s trace_id=%s session_id=%s provider=%s model=%s",
+        run_id,
+        trace_id,
+        state.get("session_id"),
+        provider,
+        model,
+    )
     em = Emitter(run_id=run_id, trace_id=trace_id, send=send)
     em.emit("run_start", {"session_id": state.get("session_id"), "graph_version": "v2"})
     state["emitter"] = em
@@ -153,9 +163,11 @@ async def run_graph_v2(
             ("task_validate", task_validate_node()),
             ("role_pack", role_pack_node(provider, model)),
         ]:
+            logger.info("NODE_CALL node=%s run_id=%s", node_name, run_id)
             updates = node(state) or {}
             if isinstance(updates, dict):
                 state.update(updates)
+            logger.info("NODE_DONE node=%s run_id=%s update_keys=%s", node_name, run_id, ",".join(sorted((updates or {}).keys())))
             state["agent_memory"] = push_note(state, node=node_name, summary=f"{node_name} completed", extra={})
 
         plan = RunPlan.model_validate(state.get("plan") or {"mode": "text_only", "text": {"enabled": True}})
@@ -180,10 +192,24 @@ async def run_graph_v2(
         other_tasks = [t for t in tasks if t.get("kind") not in knowledge_kinds]
         # Always produce streamed final text for knowledge/research tasks, even when planner mode is tools_only.
         should_emit_text = bool(plan.text.enabled or knowledge_tasks)
+        logger.info(
+            "PLAN_SUMMARY run_id=%s mode=%s text_enabled=%s tasks=%s should_emit_text=%s",
+            run_id,
+            plan.mode,
+            plan.text.enabled,
+            [str(t.get("kind")) for t in tasks],
+            should_emit_text,
+        )
 
         async def run_one(t: Dict[str, Any]) -> None:
             nonlocal last_image_prompt
             image_timeout_sec = float(os.getenv("IMAGE_TASK_TIMEOUT_SEC", "90"))
+            logger.info(
+                "TASK_START run_id=%s task_id=%s kind=%s",
+                run_id,
+                t.get("id"),
+                t.get("kind"),
+            )
             try:
                 if str(t.get("kind", "")) == "image_gen":
                     out = await asyncio.wait_for(
@@ -201,6 +227,7 @@ async def run_graph_v2(
                 }
             except Exception as e:
                 out = {"task_id": t.get("id"), "kind": t.get("kind"), "ok": False, "error": str(e)}
+                logger.exception("TASK_ERROR run_id=%s task_id=%s kind=%s error=%s", run_id, t.get("id"), t.get("kind"), e)
 
             kind = str(t.get("kind", ""))
             if out.get("ok") and kind in {"web", "rag", "kb_rag", "vision"}:
@@ -236,6 +263,14 @@ async def run_graph_v2(
                 }
 
             outs[str(t.get("id"))] = out
+            logger.info(
+                "TASK_DONE run_id=%s task_id=%s kind=%s ok=%s data_keys=%s",
+                run_id,
+                t.get("id"),
+                kind,
+                out.get("ok", False),
+                ",".join(sorted((out.get("data") or {}).keys())) if isinstance(out.get("data"), dict) else "",
+            )
             em.emit("block_end", {"block_id": t.get("id"), "payload": out})
 
         async def run_group(group: List[Dict[str, Any]]) -> None:

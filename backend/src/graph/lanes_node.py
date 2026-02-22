@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any, Dict, List
 
+from backend.src.core.logging import get_logger
 from backend.src.llm.factory import get_llm
 from backend.src.graph.agent_memory import push_note
 from backend.src.schemas.plan import RunPlan
@@ -16,10 +17,19 @@ _GREETING_ONLY_RE = re.compile(
     r"^\s*(hi|hello|hey|yo|sup|what'?s up|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
     re.IGNORECASE,
 )
+logger = get_logger("omniagent.graph.lanes")
 
 
 def lanes_node(provider: str, model: str):
     async def _run(state: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            "NODE_CALL node=lanes run_id=%s trace_id=%s session_id=%s provider=%s model=%s",
+            state.get("run_id"),
+            state.get("trace_id"),
+            state.get("session_id"),
+            provider,
+            model,
+        )
         em = state["emitter"]
         text_provider = os.getenv("TEXT_PROVIDER", provider)
         text_model = os.getenv("TEXT_MODEL", model)
@@ -149,6 +159,12 @@ def lanes_node(provider: str, model: str):
         # as soon as retrieval context is ready (without waiting on slower image/doc/audio tasks).
         async def run_selected(selected: List[Dict[str, Any]]) -> None:
             async def one(t):
+                logger.info(
+                    "TASK_START run_id=%s task_id=%s kind=%s",
+                    state.get("run_id"),
+                    t.get("id"),
+                    t.get("kind"),
+                )
                 task_for_run = dict(t)
                 subject_lock = task_for_run.get("subject_lock")
                 max_replans = int(runtime.get("max_replans", 0))
@@ -185,6 +201,13 @@ def lanes_node(provider: str, model: str):
                     }
                 except Exception as e:
                     r = {"task_id": t["id"], "kind": t.get("kind"), "ok": False, "error": str(e)}
+                    logger.exception(
+                        "TASK_ERROR run_id=%s task_id=%s kind=%s error=%s",
+                        state.get("run_id"),
+                        t.get("id"),
+                        t.get("kind"),
+                        e,
+                    )
                 finally:
                     outs[t["id"]] = r
                     nonlocal last_image_prompt
@@ -219,6 +242,14 @@ def lanes_node(provider: str, model: str):
                             "text": (d.get("text") or "")[:2000],
                         }
                     em.emit("block_end", {"block_id": t["id"], "payload": r})
+                    logger.info(
+                        "TASK_DONE run_id=%s task_id=%s kind=%s ok=%s data_keys=%s",
+                        state.get("run_id"),
+                        t.get("id"),
+                        t.get("kind"),
+                        r.get("ok", False),
+                        ",".join(sorted((r.get("data") or {}).keys())) if isinstance(r.get("data"), dict) else "",
+                    )
 
             if selected:
                 await asyncio.gather(*[one(t) for t in selected])
@@ -228,6 +259,14 @@ def lanes_node(provider: str, model: str):
         media_tasks = {"image_gen", "tts", "doc"}
         media_only = bool(tasks) and all(t.get("kind") in media_tasks for t in tasks)
         should_emit_text = bool(plan.text.enabled or knowledge_task_items)
+        logger.info(
+            "LANES_PLAN run_id=%s mode=%s text_enabled=%s should_emit_text=%s tasks=%s",
+            state.get("run_id"),
+            plan.mode,
+            plan.text.enabled,
+            should_emit_text,
+            [str(t.get("kind")) for t in tasks],
+        )
 
         def history_text() -> str:
             if not history:

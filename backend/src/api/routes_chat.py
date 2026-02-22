@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.src.core.constants import MAX_HISTORY_MESSAGES
+from backend.src.core.logging import get_logger
 from backend.src.graph.runner import build_graph, run_graph
 from backend.src.graph.v2_flow import run_graph_v2
 from backend.src.llm.factory import get_llm
@@ -17,6 +18,7 @@ from backend.src.session.store import get_session, cleanup, clear_session, serve
 from backend.src.stream.sse import sse_gen
 
 router = APIRouter()
+logger = get_logger("omniagent.api.chat")
 
 
 class ChatIn(BaseModel):
@@ -274,6 +276,15 @@ async def chat_stream(inp: ChatIn):
         loop.call_soon_threadsafe(q.put_nowait, ev)
 
     run_id, trace_id = str(uuid4())[:8], str(uuid4())[:8]
+    logger.info(
+        "CHAT_STREAM_START session_id=%s run_id=%s trace_id=%s provider=%s model=%s attachments=%s",
+        inp.session_id,
+        run_id,
+        trace_id,
+        inp.provider,
+        inp.model,
+        len(sess.get("attachments", [])),
+    )
     artifact_memory = sess.get("artifact_memory", {}) or {}
     artifact_memory.setdefault("lineage", {"image": [], "audio": [], "doc": []})
     likely_tool_turn = _likely_tool_turn(inp.text, bool(sess.get("attachments", [])))
@@ -314,6 +325,12 @@ async def chat_stream(inp: ChatIn):
             if final_text:
                 sess["chat_history"].append({"role": "assistant", "content": final_text})
             sess["chat_history"] = sess["chat_history"][-MAX_HISTORY_MESSAGES:]
+            logger.info(
+                "CHAT_STREAM_DONE session_id=%s run_id=%s final_text_len=%s",
+                inp.session_id,
+                run_id,
+                len(final_text or ""),
+            )
         finally:
             await q.put(None)
 
