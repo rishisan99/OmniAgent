@@ -318,7 +318,15 @@ async def chat_stream(inp: ChatIn):
             await q.put(None)
 
     asyncio.create_task(done())
-    return StreamingResponse(sse_gen(q), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_gen(q),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/session/meta")

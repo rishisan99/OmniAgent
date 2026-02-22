@@ -108,7 +108,8 @@ export function Blocks({
     order?: string[];
 }) {
     const api = apiBase();
-    const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS === "true";
+    // Show tool/retrieval blocks by default so parallel lanes are visible in the UI.
+    const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS !== "false";
     const actionBtnClass =
         "inline-flex items-center rounded-md border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-800 transition hover:bg-slate-200";
 
