@@ -176,11 +176,11 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
         k in user_l
         for k in ("uploaded", "upload", "file", "document", "doc", "pdf", "image", "photo", "picture", "attachment")
     )
-    if is_db_scripted:
+    if has_attachments and has_file_reference:
+        scripted = "Analyzing your uploaded file now and preparing the answer."
+    elif is_db_scripted:
         subject = _clean_db_subject(db_clause) or db_clause
         scripted = f'I will search the database for records on "{subject}".'
-    elif has_attachments and has_file_reference:
-        scripted = "Analyzing your uploaded file now and preparing the answer."
     elif parts:
         # Deduplicate while preserving order.
         seen_p: set[str] = set()

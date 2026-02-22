@@ -4,6 +4,22 @@ import { apiBase } from "@/lib/api";
 
 type Block = { block_id: string; title?: string; kind?: string; payload?: unknown };
 
+function pickData(payload: unknown): Record<string, unknown> {
+    if (!payload || typeof payload !== "object") return {};
+    const p = payload as Record<string, unknown>;
+    const d = p.data;
+    if (d && typeof d === "object") return d as Record<string, unknown>;
+    return p;
+}
+
+function firstString(obj: Record<string, unknown>, keys: string[]): string {
+    for (const k of keys) {
+        const v = obj[k];
+        if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+}
+
 function esc(s: string): string {
     return s
         .replace(/&/g, "&amp;")
@@ -108,8 +124,8 @@ export function Blocks({
     order?: string[];
 }) {
     const api = apiBase();
-    // Show tool/retrieval blocks by default so parallel lanes are visible in the UI.
-    const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS !== "false";
+    // Hide technical retrieval blocks by default; enable only for debugging.
+    const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS === "true";
     const actionBtnClass =
         "inline-flex items-center rounded-md border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-800 transition hover:bg-slate-200";
 
@@ -141,23 +157,37 @@ export function Blocks({
     const list = ids
         .map((id) => blocks[id])
         .filter(Boolean)
-        .filter(
-            (b) =>
-                showKnowledgeBlocks
-                || (b.kind !== "web" && b.kind !== "rag" && b.kind !== "kb_rag" && b.kind !== "vision"),
-        );
+        .filter((b) => {
+            const kind = b.kind || "";
+            if (!showKnowledgeBlocks && (kind === "web" || kind === "rag" || kind === "kb_rag" || kind === "vision")) {
+                return false;
+            }
+            if (kind === "meta_initial" || kind === "meta_conclusion" || kind === "text") return true;
+            const p = pickData(b.payload);
+            const url = firstString(p, ["url", "asset_url", "file_url"]);
+            const mime = firstString(p, ["mime", "content_type"]);
+            const hasText = typeof p.text === "string" && p.text.trim().length > 0;
+            const hasUrl = Boolean(url);
+            const hasPayload = Boolean(b.payload);
+            const keepPendingMedia = !hasPayload && (kind === "image_gen" || kind === "doc" || kind === "tts");
+            return keepPendingMedia || hasText || hasUrl || mime.startsWith("image/") || mime.startsWith("audio/");
+        });
 
     return (
         <div className="space-y-2">
             {list.map((b) => {
-                const payloadObj = (b.payload as { data?: Record<string, unknown> } | undefined) || {};
-                const p = (payloadObj.data || payloadObj) as Record<string, unknown>;
-                const url = typeof p.url === "string" ? `${api}${p.url}` : null;
-                const mime = typeof p.mime === "string" ? p.mime : "";
-                const filename = typeof p.filename === "string" ? p.filename : "document";
+                const p = pickData(b.payload);
+                const rawUrl = firstString(p, ["url", "asset_url", "file_url"]);
+                const url = rawUrl
+                    ? (rawUrl.startsWith("http://") || rawUrl.startsWith("https://") ? rawUrl : `${api}${rawUrl}`)
+                    : null;
+                const mime = firstString(p, ["mime", "content_type"]);
+                const filename = firstString(p, ["filename", "name"]) || "document";
                 const isPending = !b.payload;
                 const md = typeof p.text === "string" ? p.text : "";
                 const isMeta = b.kind === "meta_initial" || b.kind === "meta_conclusion";
+                const imageLikeUrl = Boolean(url && /\.(png|jpe?g|webp|gif|bmp|svg)(\?|$)/i.test(url));
+                const audioLikeUrl = Boolean(url && /\.(mp3|wav|m4a|ogg)(\?|$)/i.test(url));
 
                 return (
                     <div
@@ -186,7 +216,7 @@ export function Blocks({
                                 dangerouslySetInnerHTML={{ __html: mdToHtml(md) }}
                             />
                         )}
-                        {url && typeof mime === "string" && mime.startsWith("image/") && (
+                        {url && (mime.startsWith("image/") || imageLikeUrl) && (
                             <div className="mt-2">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
@@ -214,7 +244,7 @@ export function Blocks({
                             </div>
                         )}
 
-                        {url && typeof mime === "string" && mime.startsWith("audio/") && (
+                        {url && (mime.startsWith("audio/") || audioLikeUrl) && (
                             <audio controls className="mt-2 w-full" src={url} />
                         )}
 
@@ -245,11 +275,7 @@ export function Blocks({
                             </a>
                         )}
 
-                        {!url && !isPending && mime !== "text/markdown" && b.kind !== "web" && b.kind !== "vision" && (
-                            <pre className="mt-2 text-xs whitespace-pre-wrap break-words bg-slate-50 p-2 rounded">
-                                {JSON.stringify(b.payload, null, 2)}
-                            </pre>
-                        )}
+                        {/* Intentionally hide raw JSON payloads; user-facing UI should show only rendered outputs. */}
                     </div>
                 );
             })}

@@ -227,6 +227,7 @@ def lanes_node(provider: str, model: str):
         other_job = asyncio.create_task(run_selected(other_task_items)) if other_task_items else None
         media_tasks = {"image_gen", "tts", "doc"}
         media_only = bool(tasks) and all(t.get("kind") in media_tasks for t in tasks)
+        should_emit_text = bool(plan.text.enabled or knowledge_task_items)
 
         def history_text() -> str:
             if not history:
@@ -456,7 +457,7 @@ def lanes_node(provider: str, model: str):
             return []
 
         llm_text = ""
-        if plan.text.enabled:
+        if should_emit_text:
             if media_only and plan.mode == "tools_only":
                 if other_job:
                     await other_job

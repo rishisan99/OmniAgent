@@ -178,6 +178,8 @@ async def run_graph_v2(
         knowledge_kinds = {"web", "rag", "kb_rag", "vision"}
         knowledge_tasks = [t for t in tasks if t.get("kind") in knowledge_kinds]
         other_tasks = [t for t in tasks if t.get("kind") not in knowledge_kinds]
+        # Always produce streamed final text for knowledge/research tasks, even when planner mode is tools_only.
+        should_emit_text = bool(plan.text.enabled or knowledge_tasks)
 
         async def run_one(t: Dict[str, Any]) -> None:
             nonlocal last_image_prompt
@@ -244,7 +246,7 @@ async def run_graph_v2(
         other_job = asyncio.create_task(run_group(other_tasks)) if other_tasks else None
 
         final_text = ""
-        if plan.text.enabled:
+        if should_emit_text:
             # Wait for knowledge lanes first when main text depends on retrieval context.
             if knowledge_job:
                 await knowledge_job
