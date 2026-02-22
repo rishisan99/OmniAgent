@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { apiUrl } from "@/lib/api";
 
 type Attachment = {
     id: string;
@@ -15,7 +16,6 @@ export function Uploader({
     sessionId: string;
     onUploaded: () => void;
 }) {
-    const api = process.env.NEXT_PUBLIC_API_BASE!;
     const ref = useRef<HTMLInputElement>(null);
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState("");
@@ -23,7 +23,7 @@ export function Uploader({
 
     async function refreshAttachments() {
         try {
-            const r = await fetch(`${api}/api/uploads/${sessionId}`);
+            const r = await fetch(apiUrl(`/api/uploads/${sessionId}`));
             if (!r.ok) throw new Error(`list failed: ${r.status}`);
             const data = (await r.json()) as { attachments?: Attachment[] };
             setAttachments(Array.isArray(data.attachments) ? data.attachments : []);
@@ -53,7 +53,7 @@ export function Uploader({
             const fd = new FormData();
             fd.append("session_id", sessionId);
             fd.append("f", f);
-            const r = await fetch(`${api}/api/upload`, {
+            const r = await fetch(apiUrl("/api/upload"), {
                 method: "POST",
                 body: fd,
                 signal: ctrl.signal,
@@ -76,7 +76,7 @@ export function Uploader({
         setBusy(true);
         setStatus("Removing from context...");
         try {
-            const r = await fetch(`${api}/api/uploads/${sessionId}/${id}`, {
+            const r = await fetch(apiUrl(`/api/uploads/${sessionId}/${id}`), {
                 method: "DELETE",
             });
             if (!r.ok) throw new Error(`remove failed: ${r.status}`);

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { apiBase } from "@/lib/api";
 
 type Block = { block_id: string; title?: string; kind?: string; payload?: unknown };
 
@@ -106,7 +107,7 @@ export function Blocks({
     blocks: Record<string, Block>;
     order?: string[];
 }) {
-    const api = process.env.NEXT_PUBLIC_API_BASE!;
+    const api = apiBase();
     const showKnowledgeBlocks = process.env.NEXT_PUBLIC_SHOW_KNOWLEDGE_BLOCKS === "true";
     const actionBtnClass =
         "inline-flex items-center rounded-md border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-800 transition hover:bg-slate-200";

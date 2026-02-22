@@ -4,6 +4,7 @@ import { ssePost, SSEMessage } from "@/lib/sse";
 import { ModelPicker } from "@/components/ModelPicker";
 import { Uploader } from "@/components/Uploader";
 import { Blocks } from "@/components/Blocks";
+import { apiUrl } from "@/lib/api";
 
 type Block = {
     block_id: string;
@@ -30,7 +31,6 @@ function createSessionId(): string {
 }
 
 export default function Page() {
-    const api = process.env.NEXT_PUBLIC_API_BASE!;
     const [sessionId, setSessionId] = useState("");
     const [provider, setProvider] = useState("openai");
     const [model, setModel] = useState("gpt-4o-mini");
@@ -81,7 +81,7 @@ export default function Page() {
         let cancelled = false;
         async function syncWithServerBoot() {
             try {
-                const r = await fetch(`${api}/api/session/meta`);
+                const r = await fetch(apiUrl("/api/session/meta"));
                 if (!r.ok) return;
                 const data = (await r.json()) as { server_boot_id?: string };
                 const bootId = String(data.server_boot_id || "");
@@ -109,7 +109,7 @@ export default function Page() {
         return () => {
             cancelled = true;
         };
-    }, [api, sessionId]);
+    }, [sessionId]);
 
     useEffect(() => {
         if (typeof window === "undefined") return;
@@ -193,7 +193,7 @@ export default function Page() {
         setInput("");
 
         try {
-            for await (const msg of ssePost(`${api}/api/chat/stream`, body)) {
+            for await (const msg of ssePost(apiUrl("/api/chat/stream"), body)) {
                 handle(msg, assistantId);
             }
         } catch (e: unknown) {
@@ -217,7 +217,7 @@ export default function Page() {
         if (!sessionId || busy) return;
         const current = sessionId;
         try {
-            await fetch(`${api}/api/session/clear`, {
+            await fetch(apiUrl("/api/session/clear"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ session_id: current }),

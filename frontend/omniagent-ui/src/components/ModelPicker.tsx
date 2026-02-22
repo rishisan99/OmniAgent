@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { apiUrl } from "@/lib/api";
 
 type ModelsResp = {
     providers: string[];
@@ -12,14 +13,13 @@ export function ModelPicker(props: {
     model: string;
     onChange: (p: string, m: string) => void;
 }) {
-    const api = process.env.NEXT_PUBLIC_API_BASE!;
     const [data, setData] = useState<ModelsResp | null>(null);
 
     useEffect(() => {
-        fetch(`${api}/api/models`)
+        fetch(apiUrl("/api/models"))
             .then((r) => r.json())
             .then(setData);
-    }, [api]);
+    }, []);
 
     useEffect(() => {
         if (data) props.onChange(data.default.provider, data.default.model);
