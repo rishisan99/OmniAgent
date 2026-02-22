@@ -20,6 +20,27 @@ function firstString(obj: Record<string, unknown>, keys: string[]): string {
     return "";
 }
 
+function deepFindString(value: unknown, keys: string[], depth = 0): string {
+    if (depth > 4 || value === null || value === undefined) return "";
+    if (typeof value === "string") return "";
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = deepFindString(item, keys, depth + 1);
+            if (found) return found;
+        }
+        return "";
+    }
+    if (typeof value !== "object") return "";
+    const obj = value as Record<string, unknown>;
+    const direct = firstString(obj, keys);
+    if (direct) return direct;
+    for (const v of Object.values(obj)) {
+        const found = deepFindString(v, keys, depth + 1);
+        if (found) return found;
+    }
+    return "";
+}
+
 function esc(s: string): string {
     return s
         .replace(/&/g, "&amp;")
@@ -164,8 +185,8 @@ export function Blocks({
             }
             if (kind === "meta_initial" || kind === "meta_conclusion" || kind === "text") return true;
             const p = pickData(b.payload);
-            const url = firstString(p, ["url", "asset_url", "file_url"]);
-            const mime = firstString(p, ["mime", "content_type"]);
+            const url = deepFindString(b.payload, ["url", "asset_url", "file_url"]) || firstString(p, ["url", "asset_url", "file_url"]);
+            const mime = deepFindString(b.payload, ["mime", "content_type"]) || firstString(p, ["mime", "content_type"]);
             const hasText = typeof p.text === "string" && p.text.trim().length > 0;
             const hasUrl = Boolean(url);
             const hasPayload = Boolean(b.payload);
@@ -177,12 +198,14 @@ export function Blocks({
         <div className="space-y-2">
             {list.map((b) => {
                 const p = pickData(b.payload);
-                const rawUrl = firstString(p, ["url", "asset_url", "file_url"]);
+                const rawUrl =
+                    deepFindString(b.payload, ["url", "asset_url", "file_url"])
+                    || firstString(p, ["url", "asset_url", "file_url"]);
                 const url = rawUrl
                     ? (rawUrl.startsWith("http://") || rawUrl.startsWith("https://") ? rawUrl : `${api}${rawUrl}`)
                     : null;
-                const mime = firstString(p, ["mime", "content_type"]);
-                const filename = firstString(p, ["filename", "name"]) || "document";
+                const mime = deepFindString(b.payload, ["mime", "content_type"]) || firstString(p, ["mime", "content_type"]);
+                const filename = deepFindString(b.payload, ["filename", "name"]) || firstString(p, ["filename", "name"]) || "document";
                 const isPending = !b.payload;
                 const md = typeof p.text === "string" ? p.text : "";
                 const isMeta = b.kind === "meta_initial" || b.kind === "meta_conclusion";
