@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Tuple
 
 from backend.src.graph.agent_memory import push_note
@@ -15,22 +14,6 @@ def _task_key(t: Dict[str, Any]) -> Tuple[str, str]:
 def task_validate_node():
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         tasks = list(state.get("tasks") or [])
-        user_text = str(state.get("user_text") or "")
-        user_l = user_text.lower()
-        explicit_image_gen = bool(
-            re.search(
-                r"(?:generate|create|make)\s+(?:an?\s+)?(?:image|picture|photo)\b|(?:image|picture|photo)\s+of\b",
-                user_l,
-            )
-        )
-        explicit_web_ask = any(
-            k in user_l
-            for k in ("web", "internet", "online", "news", "headline", "headlines", "search", "arxiv", "paper", "research")
-        )
-        explicit_text_ask = any(
-            k in user_l
-            for k in ("explain", "describe", "summarize", "summary", "tell me", "what is", "why", "how")
-        )
         cleaned: List[Dict[str, Any]] = []
         seen = set()
         dropped = 0
@@ -50,14 +33,6 @@ def task_validate_node():
                 except Exception:
                     item["top_k"] = 5
             cleaned.append(item)
-
-        # Deterministic guardrail: pure image-generation asks should not pull web/arxiv lanes.
-        if explicit_image_gen and not explicit_web_ask and not explicit_text_ask:
-            has_image_gen = any(t.get("kind") == "image_gen" for t in cleaned)
-            if has_image_gen:
-                before = len(cleaned)
-                cleaned = [t for t in cleaned if t.get("kind") not in {"web", "rag", "kb_rag"}]
-                dropped += max(0, before - len(cleaned))
 
         return {
             "tasks": cleaned,

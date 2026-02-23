@@ -173,44 +173,12 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
         parts.append(f'fetch recent news on "{news_clause}"')
         labels.append("news summary")
 
-    is_db_scripted = bool(db_clause) and not any((doc_clause, audio_clause, image_clause, arxiv_clause, news_clause))
     has_file_reference = any(
         k in user_l
         for k in ("uploaded", "upload", "file", "document", "doc", "pdf", "image", "photo", "picture", "attachment")
     )
     if has_attachments and has_file_reference:
         scripted = "Analyzing your uploaded file now and preparing the answer."
-    elif is_db_scripted:
-        subject = _clean_db_subject(db_clause) or db_clause
-        scripted = f'I will search the database for records on "{subject}".'
-    elif parts:
-        # Deduplicate while preserving order.
-        seen_p: set[str] = set()
-        uniq_parts: list[str] = []
-        for p in parts:
-            k = p.lower().strip()
-            if k and k not in seen_p:
-                seen_p.add(k)
-                uniq_parts.append(p)
-        seen_l: set[str] = set()
-        uniq_labels: list[str] = []
-        for l in labels:
-            k = l.lower().strip()
-            if k and k not in seen_l:
-                seen_l.add(k)
-                uniq_labels.append(l)
-        parts = uniq_parts
-        labels = uniq_labels
-
-        summary = ", ".join(labels[:-1]) + (f", and {labels[-1]}" if len(labels) > 1 else labels[0])
-        actions = [p.capitalize() for p in parts]
-        if len(actions) == 1:
-            flow = actions[0]
-        elif len(actions) == 2:
-            flow = f"{actions[0]}, then {actions[1]}"
-        else:
-            flow = ", then ".join(actions[:-1]) + f", and finally {actions[-1]}"
-        scripted = f"Sure, working on this now; I'll produce {summary}: {flow}."
     else:
         scripted = ""
 
@@ -218,12 +186,11 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
     em_model = os.getenv("INITIAL_MODEL", os.getenv("INTENT_MODEL", model))
     start_delay_ms = int(os.getenv("INITIAL_START_DELAY_MS", "200"))
     delay_ms = int(os.getenv("INITIAL_TOKEN_DELAY_MS", "16"))
-    if is_db_scripted:
-        start_delay_ms = int(os.getenv("INITIAL_DB_START_DELAY_MS", "0"))
-        delay_ms = int(os.getenv("INITIAL_DB_TOKEN_DELAY_MS", "6"))
     prompt = (
-        "Write one short sentence acknowledging requested tool outputs.\n"
+        "Write one short sentence acknowledging the user's request and next action.\n"
         "No markdown, no bullets, no quotes.\n"
+        "Do not say you cannot create images/audio/documents.\n"
+        "If the user asked to generate content, acknowledge that generation will proceed.\n"
         f"USER:\n{user_text}\n"
     )
     em_text = ""

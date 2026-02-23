@@ -558,6 +558,7 @@ def lanes_node(provider: str, model: str):
                         "Use short headings and compact bullets where useful.\n"
                         "Avoid long paragraphs (>3 lines each).\n"
                         "If tool outputs are present, treat them as completed results and do not say you cannot perform generation.\n"
+                        "Never claim inability such as 'I can't create images/audio/documents'.\n"
                         "Never output internal labels/headers like CHAT_HISTORY or TOOL_CONTEXT.\n"
                         "When a turn has both text and tool outputs, answer ONLY the user's text/explanation requests.\n"
                         "Address all distinct textual asks in the same user message; do not skip any requested text output.\n"
@@ -643,6 +644,11 @@ def lanes_node(provider: str, model: str):
                         llm_text = await emit_text_tokens(reviewed)
                     else:
                         llm_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+                    if any(t.get("kind") in {"image_gen", "tts", "doc"} for t in tasks):
+                        banned = ("can't create", "cannot create", "unable to create", "i can't create", "i cannot create")
+                        low = (llm_text or "").lower()
+                        if any(b in low for b in banned):
+                            llm_text = ""
                     # Soft guard: if greeting-only prompt still produced a long answer,
                     # rewrite once into a compact single sentence using the same LLM.
                     if _GREETING_ONLY_RE.match(str(query_text or "")):

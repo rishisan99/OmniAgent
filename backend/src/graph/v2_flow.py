@@ -359,6 +359,7 @@ async def run_graph_v2(
                 "Prefer short headings and concise bullets.\n"
                 "Avoid long paragraphs (>3 lines each).\n"
                 "If tool outputs are present, treat them as completed and avoid status chatter.\n"
+                "Never claim inability such as 'I can't create images/audio/documents'.\n"
                 "Do not invent URLs. Use only URLs present in context.\n"
                 f"{state.get('text_instructions', '')}\n\n"
                 + (
@@ -380,6 +381,11 @@ async def run_graph_v2(
                 + f"User message:\n{query_text}\n"
             )
             final_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+            if any(t.get("kind") in {"image_gen", "tts", "doc"} for t in tasks):
+                banned = ("can't create", "cannot create", "unable to create", "i can't create", "i cannot create")
+                low = (final_text or "").lower()
+                if any(b in low for b in banned):
+                    final_text = ""
             if _GREETING_ONLY_RE.match(query_text):
                 word_count = len((final_text or "").strip().split())
                 if word_count > 20:
