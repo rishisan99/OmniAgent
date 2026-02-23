@@ -25,6 +25,15 @@ _GREETING_ONLY_RE = re.compile(
     r"^\s*(hi|hello|hey|yo|sup|what'?s up|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
     re.IGNORECASE,
 )
+_EXPLICIT_TOOL_CUE_RE = re.compile(
+    r"\b("
+    r"generate|create|make|draw|image|photo|picture|audio|voice|tts|speak|read aloud|"
+    r"pdf|document|docx|upload|file|attachment|"
+    r"web|internet|news|headline|headlines|search|find|fetch|google|wikipedia|"
+    r"arxiv|paper|preprint|latest|recent|current|today"
+    r")\b",
+    re.IGNORECASE,
+)
 logger = get_logger("omniagent.graph.v2")
 
 
@@ -80,6 +89,18 @@ def _tool_context_text(outs: Dict[str, Any]) -> str:
             if urls:
                 rows.append("WEB URLS:\n" + "\n".join(f"- {u}" for u in urls[:8]))
     return "\n\n".join(rows)
+
+
+def _can_fast_text_path(state: Dict[str, Any]) -> bool:
+    user = str(state.get("user_text") or "").strip()
+    if not user:
+        return False
+    attachments = state.get("attachments") or []
+    if attachments:
+        return False
+    if _EXPLICIT_TOOL_CUE_RE.search(user):
+        return False
+    return True
 
 
 async def _supportive_summary(
@@ -154,6 +175,41 @@ async def run_graph_v2(
     state["emitter"] = em
     state["agent_memory"] = push_note(state, node="initial_message", summary="Initial message node entered", extra={})
     try:
+        if _can_fast_text_path(state):
+            logger.info("NODE_CALL node=fast_text_path run_id=%s", run_id)
+            history = list(state.get("chat_history") or [])
+            query_text = str(state.get("user_text", ""))
+            text_provider = os.getenv("TEXT_PROVIDER", provider)
+            text_model = os.getenv("TEXT_MODEL", model)
+            prompt = (
+                "You are OmniAgent. Reply directly in markdown.\n"
+                "Keep it concise, clear, and grounded.\n"
+                + (
+                    "This turn is a greeting/social opener.\n"
+                    "Reply with exactly one short friendly sentence (max 14 words), no headings.\n"
+                    if _GREETING_ONLY_RE.match(query_text)
+                    else ""
+                )
+                + f"Conversation so far:\n{_history_text(history[-4:])}\n\n"
+                + f"User message:\n{query_text}\n"
+            )
+            final_text = await stream_tokens(prompt, em, provider=text_provider, model=text_model, temperature=0.2)
+            checker = _checker_payload([], {}, final_text)
+            em.emit("run_end", {"ok": True, "graph_version": "v2"})
+            return {
+                "final_text": final_text,
+                "tool_outputs": {},
+                "last_image_prompt": state.get("last_image_prompt"),
+                "artifact_memory": state.get("artifact_memory") or {},
+                "checker": checker,
+                "agent_memory": push_note(
+                    state,
+                    node="fast_text_path",
+                    summary="Fast text-only path completed",
+                    extra={"text_len": len(final_text or "")},
+                ),
+            }
+
         for node_name, node in [
             ("context", context_node()),
             ("planner_intent", intent_llm_node(provider, model)),
@@ -296,6 +352,8 @@ async def run_graph_v2(
                 "- Greetings, acknowledgements, or very simple asks: keep concise (1-4 lines).\n"
                 "- Mixed asks: allocate length proportionally and avoid filler.\n"
             )
+            no_tool_tasks = not bool(tasks)
+            recent_history = history[-4:] if no_tool_tasks else history
             kb_no_exact_entity = False
             kb_missing_name = ""
             for v in outs.values():
@@ -355,9 +413,21 @@ async def run_graph_v2(
                 }
             prompt = (
                 "You are OmniAgent. Answer directly in markdown.\n"
-                + f"{length_rules}"
-                + "Prefer short headings and concise bullets.\n"
-                + "Avoid long paragraphs (>3 lines each).\n"
+                + (
+                    "Keep response lightweight and direct.\n"
+                    if no_tool_tasks
+                    else f"{length_rules}"
+                )
+                + (
+                    "Use plain markdown with minimal structure.\n"
+                    if no_tool_tasks
+                    else "Prefer short headings and concise bullets.\n"
+                )
+                + (
+                    ""
+                    if no_tool_tasks
+                    else "Avoid long paragraphs (>3 lines each).\n"
+                )
                 + (
                     "This turn is a greeting/social opener.\n"
                     "Reply with exactly one short friendly sentence (max 14 words), no headings.\n"
@@ -373,10 +443,10 @@ async def run_graph_v2(
                     f"Researcher brief:\n{response_contract.get('researcher_brief', '')}\n\n"
                     f"Writer plan:\n{response_contract.get('writer_plan', '')}\n\n"
                     f"Critic checks:\n{response_contract.get('critic_checks', '')}\n\n"
-                    if response_contract
+                    if response_contract and not no_tool_tasks
                     else ""
                 )
-                + f"Conversation so far:\n{_history_text(history)}\n\n"
+                + f"Conversation so far:\n{_history_text(recent_history)}\n\n"
                 + (f"Tool context:\n{context}\n\n" if context else "")
                 + (
                     "KB_RAG indicates no exact entity match for the requested name.\n"

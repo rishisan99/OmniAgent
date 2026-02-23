@@ -19,6 +19,37 @@ PLANNER_SYSTEM_PROMPT = (
 
 
 def intent_llm_node(provider: str, model: str):
+    def _fallback_text_only(state: Dict[str, Any], note: str, confidence: float = 0.5) -> Dict[str, Any]:
+        plan = RunPlan(
+            mode="text_only",
+            text=TextPlan(enabled=True),
+            flags={
+                "needs_web": False,
+                "needs_rag": False,
+                "needs_kb_rag": False,
+                "needs_doc": False,
+                "needs_vision": False,
+                "needs_tts": False,
+                "needs_image_gen": False,
+            },
+            web_source=None,
+            note=note,
+        )
+        return {
+            "plan": plan.model_dump(),
+            "intent": {
+                "intent_type": "chat",
+                "target_modality": "text",
+                "confidence": confidence,
+            },
+            "agent_memory": push_note(
+                state,
+                node="intent",
+                summary="Intent fallback to text-only",
+                extra={"note": note},
+            ),
+        }
+
     def _prompt(user: str, has_files: bool, has_last_image: bool) -> str:
         return (
             "You are an intent classifier for a multimodal assistant.\n"
@@ -85,20 +116,22 @@ def intent_llm_node(provider: str, model: str):
             if pair not in candidate_pairs:
                 candidate_pairs.append(pair)
 
-        for i, (p, candidate) in enumerate(candidate_pairs):
-            llm = get_llm(p, candidate, streaming=False, temperature=0.0)
-            try:
-                raw = (llm.invoke(f"{PLANNER_SYSTEM_PROMPT}\n\n{prompt}").content or "").strip()
-                break
-            except Exception as e:
-                last_err = e
-                if i < len(candidate_pairs) - 1 and is_not_found_error(e):
-                    continue
-                raise
-        if not raw and last_err:
-            raise last_err
-
-        data = extract_json(raw)
+        try:
+            for i, (p, candidate) in enumerate(candidate_pairs):
+                llm = get_llm(p, candidate, streaming=False, temperature=0.0)
+                try:
+                    raw = (llm.invoke(f"{PLANNER_SYSTEM_PROMPT}\n\n{prompt}").content or "").strip()
+                    break
+                except Exception as e:
+                    last_err = e
+                    if i < len(candidate_pairs) - 1 and is_not_found_error(e):
+                        continue
+                    raise
+            if not raw and last_err:
+                raise last_err
+            data = extract_json(raw)
+        except Exception:
+            return _fallback_text_only(state, note="intent_llm_error_fallback", confidence=0.45)
 
         task_list = data.get("tasks") or []
         allowed = {"text", "image", "document", "audio", "web", "rag", "arxiv", "kb_rag"}
