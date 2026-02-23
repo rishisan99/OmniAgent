@@ -429,6 +429,47 @@ export default function Page() {
                 }),
             );
         }
+        if (msg.type === "task_result") {
+            const taskId = msg.data?.task_id;
+            const kind = msg.data?.kind;
+            const ok = msg.data?.ok;
+            if (typeof taskId !== "string" || kind !== "image_gen" || ok !== true) return;
+            const url =
+                typeof msg.data?.url === "string" && msg.data.url.trim()
+                    ? msg.data.url.trim()
+                    : "";
+            if (!url) return;
+            const filename =
+                typeof msg.data?.filename === "string" && msg.data.filename.trim()
+                    ? msg.data.filename.trim()
+                    : "image.png";
+            const mime =
+                typeof msg.data?.mime === "string" && msg.data.mime.trim()
+                    ? msg.data.mime.trim()
+                    : "image/png";
+            return setMessages((m) =>
+                m.map((x) => {
+                    if (x.id !== assistantId) return x;
+                    const prev = x.blocks[taskId] || { block_id: taskId, kind: "image_gen", title: "Generated Image" };
+                    if (prev.payload) return x;
+                    return {
+                        ...x,
+                        blocks: {
+                            ...x.blocks,
+                            [taskId]: {
+                                ...prev,
+                                payload: {
+                                    ok: true,
+                                    kind: "image_gen",
+                                    data: { url, filename, mime },
+                                },
+                            },
+                        },
+                        blockOrder: x.blockOrder.includes(taskId) ? x.blockOrder : [...x.blockOrder, taskId],
+                    };
+                }),
+            );
+        }
         if (msg.type === "error") {
             flushTokenBuffer();
             return setMessages((m) =>

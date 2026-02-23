@@ -35,5 +35,15 @@ def run(task: Dict[str, Any], state: Dict[str, Any], em: Emitter) -> Dict[str, A
         data.get("filename"),
         data.get("url"),
     )
-    em.emit("task_result", {"task_id": t.id, "kind": t.kind, "ok": out.get("ok", False)})
+    em.emit(
+        "task_result",
+        {
+            "task_id": t.id,
+            "kind": t.kind,
+            "ok": out.get("ok", False),
+            "url": data.get("url"),
+            "filename": data.get("filename"),
+            "mime": data.get("mime"),
+        },
+    )
     return out
