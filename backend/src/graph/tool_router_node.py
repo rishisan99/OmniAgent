@@ -165,6 +165,9 @@ def tool_router_node():
             )
 
         if flags.get("needs_tts"):
+            explicit_tts_request = any(
+                k in user_l for k in ("audio", "voice", "tts", "speak", "read aloud", "narrate")
+            )
             text = _find_clause(
                 user_text,
                 [
@@ -184,7 +187,8 @@ def tool_router_node():
                     ],
                 )
             )
-            tasks.append({"id": str(uuid4())[:8], "kind": "tts", "text": text, "voice": "alloy"})
+            if explicit_tts_request and text:
+                tasks.append({"id": str(uuid4())[:8], "kind": "tts", "text": text, "voice": "alloy"})
 
         if flags.get("needs_doc"):
             doc = next((a for a in state.get("attachments", []) if a.get("kind") == "doc"), None)

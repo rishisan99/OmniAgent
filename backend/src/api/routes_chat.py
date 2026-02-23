@@ -184,35 +184,29 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
 
     em_provider = os.getenv("INITIAL_PROVIDER", os.getenv("INTENT_PROVIDER", provider))
     em_model = os.getenv("INITIAL_MODEL", os.getenv("INTENT_MODEL", model))
-    start_delay_ms = int(os.getenv("INITIAL_START_DELAY_MS", "200"))
-    delay_ms = int(os.getenv("INITIAL_TOKEN_DELAY_MS", "16"))
+    llm_timeout_sec = float(os.getenv("INITIAL_LLM_TIMEOUT_SEC", "1.2"))
     prompt = (
-        "Write one short sentence acknowledging the user's request and next action.\n"
-        "No markdown, no bullets, no quotes.\n"
+        "Write exactly one short plain sentence (8-16 words) acknowledging the user request.\n"
+        "No markdown, no bullets, no quotes, no prefaces.\n"
         "Do not say you cannot create images/audio/documents.\n"
-        "If the user asked to generate content, acknowledge that generation will proceed.\n"
+        "If user asked for generation or retrieval, say you are starting it now.\n"
         f"USER:\n{user_text}\n"
     )
     em_text = ""
     send({"type": "block_start", "data": {"block_id": "__meta_initial__", "title": "Initial", "kind": "meta_initial"}})
     try:
-        if start_delay_ms > 0:
-            await asyncio.sleep(start_delay_ms / 1000.0)
         if scripted:
-            words = scripted.split(" ")
-            for i, w in enumerate(words):
-                tok = w + (" " if i < len(words) - 1 else "")
-                em_text += tok
-                send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": tok}})
-                if delay_ms > 0:
-                    await asyncio.sleep(delay_ms / 1000.0)
+            em_text = scripted
+            send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": em_text}})
         else:
-            llm = get_llm(em_provider, em_model, streaming=True, temperature=0.2)
-            async for chunk in llm.astream(prompt):
-                tok = getattr(chunk, "content", "") or ""
-                if tok:
-                    em_text += tok
-                    send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": tok}})
+            llm = get_llm(em_provider, em_model, streaming=False, temperature=0.1)
+            msg = await asyncio.wait_for(
+                asyncio.to_thread(llm.invoke, prompt),
+                timeout=max(0.5, llm_timeout_sec),
+            )
+            em_text = (getattr(msg, "content", "") or "").strip()
+            if em_text:
+                send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": em_text}})
     except Exception:
         em_text = "Working on your request now."
         send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": em_text}})
@@ -263,26 +257,28 @@ async def chat_stream(inp: ChatIn):
              "initial_meta_emitted": likely_tool_turn}
 
     use_graph_v2 = os.getenv("GRAPH_V2_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-    if use_graph_v2:
-        task = asyncio.create_task(
-            run_graph_v2(state, send, run_id=run_id, trace_id=trace_id, provider=inp.provider, model=inp.model)
-        )
-    else:
-        app = build_graph(inp.provider, inp.model)
-        task = asyncio.create_task(run_graph(app, state, send, run_id=run_id, trace_id=trace_id))
-    initial_task = (
-        asyncio.create_task(_stream_initial_block(send, inp.text, inp.provider, inp.model, has_attachments=bool(sess.get("attachments", []))))
-        if likely_tool_turn
-        else None
-    )
-
     async def done():
         try:
-            if initial_task:
-                await asyncio.gather(initial_task, task)
-                out = task.result()
+            if likely_tool_turn:
+                await _stream_initial_block(
+                    send,
+                    inp.text,
+                    inp.provider,
+                    inp.model,
+                    has_attachments=bool(sess.get("attachments", [])),
+                )
+            if use_graph_v2:
+                out = await run_graph_v2(
+                    state,
+                    send,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    provider=inp.provider,
+                    model=inp.model,
+                )
             else:
-                out = await task
+                app = build_graph(inp.provider, inp.model)
+                out = await run_graph(app, state, send, run_id=run_id, trace_id=trace_id)
             final_text = (out or {}).get("final_text", "")
             if (out or {}).get("last_image_prompt"):
                 sess["last_image_prompt"] = out["last_image_prompt"]

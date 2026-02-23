@@ -355,13 +355,19 @@ async def run_graph_v2(
                 }
             prompt = (
                 "You are OmniAgent. Answer directly in markdown.\n"
-                f"{length_rules}"
-                "Prefer short headings and concise bullets.\n"
-                "Avoid long paragraphs (>3 lines each).\n"
-                "If tool outputs are present, treat them as completed and avoid status chatter.\n"
-                "Never claim inability such as 'I can't create images/audio/documents'.\n"
-                "Do not invent URLs. Use only URLs present in context.\n"
-                f"{state.get('text_instructions', '')}\n\n"
+                + f"{length_rules}"
+                + "Prefer short headings and concise bullets.\n"
+                + "Avoid long paragraphs (>3 lines each).\n"
+                + (
+                    "This turn is a greeting/social opener.\n"
+                    "Reply with exactly one short friendly sentence (max 14 words), no headings.\n"
+                    if _GREETING_ONLY_RE.match(query_text)
+                    else ""
+                )
+                + "If tool outputs are present, treat them as completed and avoid status chatter.\n"
+                + "Never claim inability such as 'I can't create images/audio/documents'.\n"
+                + "Do not invent URLs. Use only URLs present in context.\n"
+                + f"{state.get('text_instructions', '')}\n\n"
                 + (
                     "Planner contract:\n"
                     f"Researcher brief:\n{response_contract.get('researcher_brief', '')}\n\n"
@@ -386,22 +392,6 @@ async def run_graph_v2(
                 low = (final_text or "").lower()
                 if any(b in low for b in banned):
                     final_text = ""
-            if _GREETING_ONLY_RE.match(query_text):
-                word_count = len((final_text or "").strip().split())
-                if word_count > 20:
-                    llm = get_llm(text_provider, text_model, streaming=False, temperature=0.1)
-                    short = ""
-                    try:
-                        msg = llm.invoke(
-                            "Rewrite the following as exactly one short friendly sentence "
-                            "(max 18 words), no headings, no bullets, no markdown:\n\n"
-                            f"{final_text}"
-                        )
-                        short = (getattr(msg, "content", "") or "").strip()
-                    except Exception:
-                        short = ""
-                    if short:
-                        final_text = short
 
         if other_job:
             await other_job

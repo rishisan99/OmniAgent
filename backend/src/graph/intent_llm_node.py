@@ -2,7 +2,6 @@
 from __future__ import annotations
 import os
 import re
-from pathlib import Path
 from typing import Any, Dict
 
 from backend.src.core.jsonx import extract_json
@@ -11,101 +10,44 @@ from backend.src.llm.factory import get_llm, is_not_found_error, model_candidate
 from backend.src.schemas.plan import RunPlan, TextPlan
 
 
-_GREETING_RE = re.compile(
-    r"^\s*(hi|hello|hey|yo|sup|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
-    flags=re.IGNORECASE,
-)
-_KB_TERMS = (
-    "insurellm",
-    "carllm",
-    "homellm",
-    "markellm",
-    "rellm",
-    "knowledge base",
-    "knowledge-base",
-)
-_KB_DOMAIN_TERMS = (
-    "company",
-    "employee",
-    "employees",
-    "staff",
-    "team",
-    "worked at",
-    "works at",
-    "job title",
-    "department",
-    "manager",
-    "salary",
-    "compensation",
-    "contract",
-    "client",
-    "product",
-    "insurellm",
-    "carllm",
-    "homellm",
-    "markellm",
-    "rellm",
-)
-_EXPLICIT_WEB_TERMS = (
-    "web",
-    "internet",
-    "online",
-    "news",
-    "headline",
-    "headlines",
-    "arxiv",
-    "search",
-    "google",
-    "wikipedia",
-    "tavily",
-    "latest",
-    "recent",
-    "current",
-)
-
 PLANNER_SYSTEM_PROMPT = (
     "You are a strict low-latency planner for a multimodal assistant.\n"
     "Priority: speed, correct tool routing, and valid JSON.\n"
     "Never include prose, markdown, comments, or extra keys.\n"
-    "If uncertain, choose the minimal safe task set and keep text enabled for user-facing answers.\n"
+    "If uncertain, choose text_only with task ['text'].\n"
 )
 
 
 def intent_llm_node(provider: str, model: str):
-    def _kb_exists() -> bool:
-        roots = [
-            Path(os.getenv("KB_ROOT_PATH", "")).expanduser() if os.getenv("KB_ROOT_PATH") else None,
-            Path("backend/docs/knowledge-base"),
-            Path("backend/docs"),
-            Path("backend/data/docs/knowledge-base"),
-        ]
-        for r in roots:
-            if r and r.exists() and r.is_dir():
-                return True
-        return False
-
     def _prompt(user: str, has_files: bool, has_last_image: bool) -> str:
         return (
             "You are an intent classifier for a multimodal assistant.\n"
-            "Allowed capabilities: text, image, document, audio, web, rag, arxiv.\n"
+            "Allowed capabilities: text, image, document, audio, web, rag, arxiv, kb_rag.\n"
             "You MUST only use those capabilities and combinations of them.\n"
             "Return ONLY valid JSON with exactly these keys:\n"
             "{\n"
             '  "mode": "text_only" | "text_plus_tools" | "tools_only",\n'
-            '  "tasks": ["text"|"image"|"document"|"audio"|"web"|"rag"|"arxiv"],\n'
+            '  "tasks": ["text"|"image"|"document"|"audio"|"web"|"rag"|"arxiv"|"kb_rag"],\n'
             '  "confidence": number,\n'
             '  "intent_type": "create"|"edit"|"analyze"|"retrieve"|"chat"\n'
             "}\n"
-            "Rules:\n"
-            "- If user asks both writing/explaining and generation, include both text and tool tasks.\n"
-            "- If user asks for document/pdf/doc/txt only, do not include text unless explicitly requested.\n"
-            "- If user asks to generate/create/make an image, do not add web/arxiv tasks unless user explicitly asks for web/news/research.\n"
-            "- For pure image generation requests, prefer tools_only with image task.\n"
-            "- arxiv is a subset of web retrieval; include task 'arxiv' when user asks papers/research.\n"
-            "- Use 'kb_rag' ONLY for company/employee related requests (organization, employees, products, contracts).\n"
+            "Routing policy:\n"
+            "- Default to text_only with ['text'] for greetings/chat/simple Q&A.\n"
+            "- Add a non-text task ONLY when explicitly requested by the user.\n"
+            "- Do NOT infer audio from general explanation requests. Audio requires explicit ask for audio/voice/tts/speak/read aloud.\n"
+            "- Do NOT infer image from general explanation requests. Image requires explicit ask to create/generate/make image/photo/picture.\n"
+            "- Do NOT infer web/arxiv unless user explicitly asks web/news/internet/search/arxiv/papers/latest/current.\n"
+            "- Use 'arxiv' specifically for paper/preprint/arxiv requests.\n"
+            "- Use 'rag' only for questions over uploaded files/documents.\n"
+            "- Use 'kb_rag' only for organization KB lookup requests (company/employees/products/contracts) when user asks for that data.\n"
+            "- If user asks both explanation and a tool action, use text_plus_tools.\n"
             "- For follow-up image edits with previous image context, choose image task.\n"
             "- No extra keys, no prose.\n"
             "Examples:\n"
+            'USER: "hi"\n'
+            'JSON: {"mode":"text_only","tasks":["text"],"confidence":0.98,"intent_type":"chat"}\n'
+            'USER: "Explain RAG in bullets"\n'
+            'JSON: {"mode":"text_only","tasks":["text"],"confidence":0.93,"intent_type":"analyze"}\n'
             'USER: "Explain RAG in bullets and generate audio for hello"\n'
             'JSON: {"mode":"text_plus_tools","tasks":["text","audio"],"confidence":0.93,"intent_type":"create"}\n'
             'USER: "Generate a PDF about AI"\n'
@@ -130,37 +72,6 @@ def intent_llm_node(provider: str, model: str):
         has_doc_attachment = any(str(a.get("kind", "")).lower() == "doc" for a in attachments)
         ctx = state.get("context_bundle") or {}
         has_last_image = bool(ctx.get("has_last_image"))
-
-        # Deterministic fast-path for short greetings.
-        if _GREETING_RE.match(user or ""):
-            plan = RunPlan(
-                mode="text_only",
-                text=TextPlan(enabled=True),
-                flags={
-                    "needs_web": False,
-                    "needs_rag": False,
-                    "needs_doc": False,
-                    "needs_vision": False,
-                    "needs_tts": False,
-                    "needs_image_gen": False,
-                },
-                web_source=None,
-                note="intent_greeting_fastpath",
-            )
-            return {
-                "plan": plan.model_dump(),
-                "intent": {
-                    "intent_type": "chat",
-                    "target_modality": "text",
-                    "confidence": 0.99,
-                },
-                "agent_memory": push_note(
-                    state,
-                    node="intent",
-                    summary="Intent fast-path greeting",
-                    extra={"mode": "text_only", "tasks": ["text"]},
-                ),
-            }
 
         prompt = _prompt(user, has_files, has_last_image)
         raw = ""
@@ -190,7 +101,15 @@ def intent_llm_node(provider: str, model: str):
         data = extract_json(raw)
 
         task_list = data.get("tasks") or []
-        tasks = [str(t).strip().lower() for t in task_list if str(t).strip()]
+        allowed = {"text", "image", "document", "audio", "web", "rag", "arxiv", "kb_rag"}
+        tasks = []
+        seen = set()
+        for item in task_list:
+            t = str(item).strip().lower()
+            if not t or t not in allowed or t in seen:
+                continue
+            seen.add(t)
+            tasks.append(t)
 
         # If a document is already uploaded and user is asking a question about it,
         # route to QA (text + retrieval) instead of document generation/extraction.
@@ -222,32 +141,7 @@ def intent_llm_node(provider: str, model: str):
             if has_doc_attachment and "rag" not in tasks:
                 tasks.append("rag")
         
-        # Deterministic retrieval cues to reduce missed web/arxiv intents.
-        if any(k in user_l for k in ("latest", "recent", "news", "top ", "headlines", "current")) and "web" not in tasks and "arxiv" not in tasks:
-            tasks.append("web")
-        if any(k in user_l for k in ("arxiv", "paper", "research paper", "preprint")) and "arxiv" not in tasks:
-            tasks.append("arxiv")
-        questionish = (
-            "?" in user
-            or user_l.startswith(("who ", "what ", "when ", "where ", "which ", "how ", "tell me", "give me"))
-        )
-        company_employee_related = any(k in user_l for k in _KB_DOMAIN_TERMS)
-        other_tool_cues = any(
-            k in user_l for k in ("image", "photo", "picture", "audio", "voice", "pdf", "document", "docx", "upload", "web", "arxiv")
-        )
-        explicit_web_ask = any(k in user_l for k in _EXPLICIT_WEB_TERMS)
-        if company_employee_related and any(k in user_l for k in _KB_TERMS):
-            if "kb_rag" not in tasks:
-                tasks.append("kb_rag")
-        elif _kb_exists() and company_employee_related and questionish and not has_files and not other_tool_cues:
-            # Default company-QA path: prefer KB retrieval over generic model memory.
-            if "kb_rag" not in tasks:
-                tasks.append("kb_rag")
-        # If this is a KB-style QA and user did not explicitly ask for web retrieval,
-        # suppress web/arxiv to avoid irrelevant internet answers.
-        if "kb_rag" in tasks and not explicit_web_ask:
-            tasks = [t for t in tasks if t not in ("web", "arxiv")]
-        # If an image is attached and user asks to analyze/describe it, route to vision.
+        # Attachment-aware fallback for image analysis turns if classifier under-selects.
         image_analysis_cues = (
             "image",
             "photo",
