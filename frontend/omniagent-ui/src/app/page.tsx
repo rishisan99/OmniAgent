@@ -52,6 +52,23 @@ function mimeFromUrl(url: string, fallback: string): string {
     return fallback;
 }
 
+function timestampFromAssetName(name: string): number | null {
+    const m = String(name || "").match(/_(\d{13})(?:\.[A-Za-z0-9]+)?$/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return Number.isFinite(n) ? n : null;
+}
+
+function assetTimestampMs(a: Artifact | null | undefined): number {
+    if (!a) return 0;
+    const idTs = a.id ? timestampFromAssetName(a.id) : null;
+    if (idTs) return idTs;
+    const url = String(a.url || "");
+    const base = url.split("/").pop() || "";
+    const urlTs = timestampFromAssetName(base);
+    return urlTs || 0;
+}
+
 export default function Page() {
     const [sessionId, setSessionId] = useState("");
     const [provider, setProvider] = useState("openai");
@@ -202,7 +219,7 @@ export default function Page() {
         reconcileDeadlineRef.current = 0;
     }
 
-    async function reconcilePendingMediaBlocks(assistantId: string) {
+    async function reconcilePendingMediaBlocks(assistantId: string, minAssetTsMs: number = 0) {
         if (!sessionId) return;
         try {
             const r = await fetch(
@@ -214,6 +231,9 @@ export default function Page() {
             const image = mem.image || null;
             const audio = mem.audio || null;
             const doc = mem.doc || null;
+            const imageTs = assetTimestampMs(image);
+            const audioTs = assetTimestampMs(audio);
+            const docTs = assetTimestampMs(doc);
 
             setMessages((all) =>
                 all.map((m) => {
@@ -222,7 +242,7 @@ export default function Page() {
                     for (const id of m.blockOrder) {
                         const b = nextBlocks[id];
                         if (!b || b.payload) continue;
-                        if (b.kind === "image_gen" && image?.url) {
+                        if (b.kind === "image_gen" && image?.url && imageTs >= minAssetTsMs) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
@@ -235,7 +255,7 @@ export default function Page() {
                                     },
                                 },
                             };
-                        } else if (b.kind === "tts" && audio?.url) {
+                        } else if (b.kind === "tts" && audio?.url && audioTs >= minAssetTsMs) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
@@ -248,7 +268,7 @@ export default function Page() {
                                     },
                                 },
                             };
-                        } else if (b.kind === "doc" && doc?.url) {
+                        } else if (b.kind === "doc" && doc?.url && docTs >= minAssetTsMs) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
@@ -272,12 +292,12 @@ export default function Page() {
         }
     }
 
-    function startReconcileWatch(assistantId: string) {
+    function startReconcileWatch(assistantId: string, minAssetTsMs: number) {
         stopReconcileWatch();
         reconcileDeadlineRef.current = Date.now() + 30_000;
         reconcileTimerRef.current = window.setInterval(() => {
             void (async () => {
-                await reconcilePendingMediaBlocks(assistantId);
+                await reconcilePendingMediaBlocks(assistantId, minAssetTsMs);
                 const msg = messagesRef.current.find((m) => m.id === assistantId);
                 if (!msg) {
                     stopReconcileWatch();
@@ -331,6 +351,7 @@ export default function Page() {
         ]);
         setActiveAssistantId(assistantId);
         setInput("");
+        const runStartedAtMs = Date.now();
 
         try {
             for await (const msg of ssePost(apiUrl("/api/chat/stream"), body)) {
@@ -348,7 +369,7 @@ export default function Page() {
             );
         } finally {
             flushTokenBuffer();
-            await reconcilePendingMediaBlocks(assistantId);
+            await reconcilePendingMediaBlocks(assistantId, runStartedAtMs);
             const unresolved = messagesRef.current.some((m) => {
                 if (m.id !== assistantId) return false;
                 return m.blockOrder.some((id) => {
@@ -359,7 +380,7 @@ export default function Page() {
             });
             if (unresolved) {
                 // Start post-run recovery only if media blocks are still pending.
-                startReconcileWatch(assistantId);
+                startReconcileWatch(assistantId, runStartedAtMs);
             } else {
                 stopReconcileWatch();
             }
