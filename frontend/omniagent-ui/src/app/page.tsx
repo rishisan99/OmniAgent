@@ -67,6 +67,9 @@ export default function Page() {
     const [greetingText, setGreetingText] = useState("");
     const tokenBufferRef = useRef<Record<string, string>>({});
     const flushTimerRef = useRef<number | null>(null);
+    const reconcileTimerRef = useRef<number | null>(null);
+    const reconcileDeadlineRef = useRef<number>(0);
+    const messagesRef = useRef<ChatMessage[]>([]);
 
     function onChange(p: string, m: string) {
         setProvider(p);
@@ -164,6 +167,10 @@ export default function Page() {
         );
     }, [messages, sessionId]);
 
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
+
     function flushTokenBuffer() {
         const buffered = tokenBufferRef.current;
         const ids = Object.keys(buffered);
@@ -185,6 +192,14 @@ export default function Page() {
             flushTokenBuffer();
             flushTimerRef.current = null;
         }, 40);
+    }
+
+    function stopReconcileWatch() {
+        if (reconcileTimerRef.current !== null) {
+            window.clearInterval(reconcileTimerRef.current);
+            reconcileTimerRef.current = null;
+        }
+        reconcileDeadlineRef.current = 0;
     }
 
     async function reconcilePendingMediaBlocks(assistantId: string) {
@@ -257,6 +272,39 @@ export default function Page() {
         }
     }
 
+    function startReconcileWatch(assistantId: string) {
+        stopReconcileWatch();
+        reconcileDeadlineRef.current = Date.now() + 120_000;
+        reconcileTimerRef.current = window.setInterval(() => {
+            void (async () => {
+                await reconcilePendingMediaBlocks(assistantId);
+                const msg = messagesRef.current.find((m) => m.id === assistantId);
+                if (!msg) {
+                    stopReconcileWatch();
+                    return;
+                }
+                const mediaKinds = new Set(["image_gen", "tts", "doc"]);
+                let hasPending = false;
+                let hasResolved = false;
+                for (const id of msg.blockOrder) {
+                    const b = msg.blocks[id];
+                    if (!b || !mediaKinds.has(String(b.kind || ""))) continue;
+                    if (b.payload) hasResolved = true;
+                    else hasPending = true;
+                }
+                if (!hasPending && hasResolved) {
+                    stopReconcileWatch();
+                    setActiveAssistantId((cur) => (cur === assistantId ? null : cur));
+                    setBusy(false);
+                    return;
+                }
+                if (Date.now() > reconcileDeadlineRef.current) {
+                    stopReconcileWatch();
+                }
+            })();
+        }, 2500);
+    }
+
     async function send() {
         if (!sessionId || !input.trim() || busy) return;
         const userText = input.trim();
@@ -282,6 +330,7 @@ export default function Page() {
             },
         ]);
         setActiveAssistantId(assistantId);
+        startReconcileWatch(assistantId);
         setInput("");
 
         try {
@@ -301,6 +350,7 @@ export default function Page() {
         } finally {
             flushTokenBuffer();
             await reconcilePendingMediaBlocks(assistantId);
+            stopReconcileWatch();
             setActiveAssistantId(null);
             setBusy(false);
         }
@@ -490,6 +540,7 @@ export default function Page() {
             if (flushTimerRef.current !== null) {
                 window.clearTimeout(flushTimerRef.current);
             }
+            stopReconcileWatch();
         };
     }, []);
 
