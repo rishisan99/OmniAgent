@@ -26,19 +26,6 @@ def role_pack_node(provider: str, model: str):
         # This preserves non-determinism in final generation while reducing pre-stream latency.
         media_kinds = {"doc", "image_gen", "tts"}
         task_set = set(tasks)
-        if not task_set:
-            contract["researcher_brief"] = "Prioritize the user's latest request and keep response focused."
-            contract["writer_plan"] = "Answer directly and concisely. Avoid unnecessary structure unless requested."
-            contract["critic_checks"] = "Avoid unsupported claims; keep answer relevant to the user query."
-            return {
-                "response_contract": contract,
-                "agent_memory": push_note(
-                    state,
-                    node="role_pack",
-                    summary="Role pack fast-path for text-only turn",
-                    extra={"tasks": tasks},
-                ),
-            }
         if task_set and task_set.issubset(media_kinds):
             contract["researcher_brief"] = "Prioritize the user's direct explanation request."
             contract["writer_plan"] = "Answer succinctly in markdown. Do not mention tool execution status."
