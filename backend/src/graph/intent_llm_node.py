@@ -111,6 +111,70 @@ def intent_llm_node(provider: str, model: str):
             seen.add(t)
             tasks.append(t)
 
+        # Deterministic cue-based fallback so UI always gets expected text/tool lanes
+        # even if classifier output misses an explicit user ask.
+        text_cues = (
+            "explain",
+            "what is",
+            "what's",
+            "who is",
+            "who's",
+            "how ",
+            "why ",
+            "tell me",
+            "summarize",
+            "summary",
+            "describe",
+            "analysis",
+            "analyze",
+            "write",
+            "story",
+            "?",
+        )
+        greeting_re = re.compile(
+            r"^\s*(hi|hello|hey|yo|sup|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
+            re.IGNORECASE,
+        )
+        explicit_image = any(k in user_l for k in ("generate image", "create image", "make image", "image of", "picture of", "photo of"))
+        explicit_audio = any(k in user_l for k in ("generate audio", "create audio", "make audio", "tts", "voice", "read aloud", "narrate", "speak "))
+        explicit_doc = (
+            any(k in user_l for k in ("pdf", "document", "docx", "text file", "txt", "markdown"))
+            and any(k in user_l for k in ("generate", "create", "make", "write", "export"))
+        )
+        explicit_web = any(k in user_l for k in ("latest", "recent", "news", "headlines", "web", "internet", "search"))
+        explicit_arxiv = any(k in user_l for k in ("arxiv", "paper", "papers", "preprint", "research paper"))
+        explicit_kb = any(
+            k in user_l
+            for k in (
+                "knowledge base",
+                "knowledge-base",
+                "employee",
+                "employees",
+                "company",
+                "contract",
+                "product",
+                "carllm",
+                "homellm",
+                "markellm",
+                "rellm",
+            )
+        )
+        asks_text = bool(greeting_re.match(user)) or any(k in user_l for k in text_cues)
+        if explicit_image and "image" not in tasks:
+            tasks.append("image")
+        if explicit_audio and "audio" not in tasks:
+            tasks.append("audio")
+        if explicit_doc and "document" not in tasks:
+            tasks.append("document")
+        if explicit_arxiv and "arxiv" not in tasks:
+            tasks.append("arxiv")
+        if explicit_web and "web" not in tasks and "arxiv" not in tasks:
+            tasks.append("web")
+        if explicit_kb and "kb_rag" not in tasks:
+            tasks.append("kb_rag")
+        if asks_text and "text" not in tasks:
+            tasks.append("text")
+
         # If a document is already uploaded and user is asking a question about it,
         # route to QA (text + retrieval) instead of document generation/extraction.
         has_doc_context = has_doc_attachment or has_memory_doc_text
