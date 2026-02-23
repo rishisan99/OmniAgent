@@ -274,7 +274,7 @@ export default function Page() {
 
     function startReconcileWatch(assistantId: string) {
         stopReconcileWatch();
-        reconcileDeadlineRef.current = Date.now() + 120_000;
+        reconcileDeadlineRef.current = Date.now() + 30_000;
         reconcileTimerRef.current = window.setInterval(() => {
             void (async () => {
                 await reconcilePendingMediaBlocks(assistantId);
@@ -330,7 +330,6 @@ export default function Page() {
             },
         ]);
         setActiveAssistantId(assistantId);
-        startReconcileWatch(assistantId);
         setInput("");
 
         try {
@@ -350,7 +349,20 @@ export default function Page() {
         } finally {
             flushTokenBuffer();
             await reconcilePendingMediaBlocks(assistantId);
-            stopReconcileWatch();
+            const unresolved = messagesRef.current.some((m) => {
+                if (m.id !== assistantId) return false;
+                return m.blockOrder.some((id) => {
+                    const b = m.blocks[id];
+                    const k = String(b?.kind || "");
+                    return (k === "image_gen" || k === "tts" || k === "doc") && !b?.payload;
+                });
+            });
+            if (unresolved) {
+                // Start post-run recovery only if media blocks are still pending.
+                startReconcileWatch(assistantId);
+            } else {
+                stopReconcileWatch();
+            }
             setActiveAssistantId(null);
             setBusy(false);
         }
