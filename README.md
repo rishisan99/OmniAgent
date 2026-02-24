@@ -1,141 +1,97 @@
-## OmniAgent EC2 Deployment Guide (From Scratch)
+# OmniAgent
 
-This guide deploys the project on one EC2 instance using Docker Compose and gives a single shareable link.
+OmniAgent is a multimodal agent system with a FastAPI backend and Next.js frontend.
+It supports text responses plus tool blocks for image, audio, document, web, RAG, knowledge-base RAG, and vision flows.
 
-### 0) Important security fix first
+## Project Structure
 
-Your repo currently contains real API keys in `.env` and `.env.prod`.
+- `backend/`: FastAPI API, graph orchestration, tool agents, SSE streaming, session + asset handling.
+- `frontend/omniagent-ui/`: Next.js app that renders streamed assistant text and generated blocks.
+- `docker-compose.yml`: Full-stack local/prod container orchestration (frontend + backend).
 
-1. Rotate all exposed keys now (OpenAI, Anthropic, Google, Tavily).
-2. Replace them in your local `.env.prod`.
-3. Never commit secrets again.
+## Core Architecture
 
-### 1) Create AWS EC2 instance
+- API entrypoint: `backend/src/api/app.py`
+- Streaming chat endpoint: `POST /api/chat/stream`
+- Session endpoints: `/api/session/meta`, `/api/session/state`, `/api/session/clear`
+- Model metadata endpoint: `GET /api/models`
+- Graph execution:
+  - v1 path: `backend/src/graph/runner.py`
+  - v2 path: `backend/src/graph/v2_flow.py` (enabled via `GRAPH_V2_ENABLED=true`)
+- Stream format: Server-Sent Events (`token`, `block_start`, `block_token`, `block_end`, `error`, etc.)
 
-1. In AWS Console, launch `Ubuntu 24.04 LTS` (or `Ubuntu 22.04 LTS`).
-2. Instance type: at least `t3.large` (recommended) for smoother Docker builds.
-3. Storage: 20+ GB.
-4. Create/download a key pair (`.pem`).
-5. Security Group inbound rules:
-   - `22` (SSH) from `My IP`
-   - `3000` (App URL) from `0.0.0.0/0`
-   - You do not need to expose `8000` publicly with this setup.
+## Features
 
-### 2) SSH into EC2
+- Streaming assistant text tokens into chat UI.
+- Tool blocks with per-task rendering:
+  - `image_gen`: image preview + download/view actions
+  - `tts`: in-app audio player
+  - `doc`: document download/view actions
+  - `web`, `rag`, `kb_rag`, `vision`: knowledge/retrieval context support
+- File upload + session artifact memory.
+- Knowledge-base indexing/warmup on backend startup.
+
+## Environment Variables
+
+Create `.env.prod` from `.env.prod.example`.
+
+Required for common flows:
+
+- `OPENAI_API_KEY`
+- `TAVILY_API_KEY` (for web/news tasks)
+
+Optional providers:
+
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
+
+Frontend/backend wiring:
+
+- `NEXT_PUBLIC_API_BASE=` (keep empty for same-origin `/api` proxy)
+- `BACKEND_INTERNAL_URL=http://backend:8000`
+
+Runtime/model controls:
+
+- `GRAPH_V2_ENABLED`
+- `TEXT_PROVIDER`, `TEXT_MODEL`
+- `SUPPORT_PROVIDER`, `SUPPORT_MODEL`
+- `PLANNER_PROVIDER`, `PLANNER_MODEL`
+- `IMAGE_TASK_TIMEOUT_SEC`, `IMAGE_API_TIMEOUT_SEC`
+
+## Local Development (without Docker)
+
+Backend (from repo root):
 
 ```bash
-chmod 400 ~/Downloads/your-key.pem
-ssh -i ~/Downloads/your-key.pem ubuntu@<EC2_PUBLIC_IP>
+uv run uvicorn backend.src.api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3) Install Docker + Compose plugin
+Frontend:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo usermod -aG docker $USER
-newgrp docker
-docker --version
-docker compose version
+cd frontend/omniagent-ui
+npm ci
+npm run dev
 ```
 
-### 4) Clone project on EC2
+App URLs:
 
-```bash
-git clone <your-repo-url> omniagent
-cd omniagent
-```
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
 
-### 5) Configure production env
-
-1. Copy the template:
+## Docker Run
 
 ```bash
 cp .env.prod.example .env.prod
-```
-
-2. Edit `.env.prod` and set valid keys:
-   - `OPENAI_API_KEY=...` (required for default flows + embeddings)
-   - `TAVILY_API_KEY=...` (required for web/news tasks)
-   - `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` optional unless you choose those providers
-3. Keep:
-   - `NEXT_PUBLIC_API_BASE=` (empty)
-   - `BACKEND_INTERNAL_URL=http://backend:8000`
-
-Why: frontend uses same-origin `/api` proxy to backend, so one recruiter link works and model list loads reliably.
-
-### 6) Build and start
-
-```bash
-docker compose --env-file .env.prod up -d --build
-docker compose ps
-```
-
-### 7) Verify backend + model endpoint
-
-```bash
-docker compose logs backend --tail=200
-curl -sS http://localhost:8000/api/models
-```
-
-Expected: JSON with `providers`, `models`, and `default`.
-
-### 8) Verify frontend from EC2
-
-```bash
-docker compose logs frontend --tail=200
-curl -I http://localhost:3000
-```
-
-### 9) Open in browser (shareable link)
-
-Use:
-
-`http://<EC2_PUBLIC_IP>:3000`
-
-### 10) If models still do not load (exact checks)
-
-1. Browser DevTools -> Network:
-   - `GET /api/models` must return `200`.
-2. On EC2:
-
-```bash
-docker compose exec frontend printenv | grep -E "NEXT_PUBLIC_API_BASE|BACKEND_INTERNAL_URL"
-docker compose exec frontend wget -qO- http://backend:8000/api/models
-```
-
-3. If `/api/models` fails in browser but works from container, restart frontend:
-
-```bash
-docker compose up -d --build frontend
-```
-
-### 11) Optional: domain + HTTPS (recommended for recruiters)
-
-1. Buy/attach a domain.
-2. Point DNS `A` record to EC2 public IP.
-3. Put Nginx/Caddy in front for TLS on `443`.
-4. Share `https://yourdomain.com` instead of raw IP.
-
-### 12) Day-2 operations
-
-Update code and redeploy:
-
-```bash
-git pull
+# edit .env.prod with real keys
 docker compose --env-file .env.prod up -d --build
 ```
 
-Stop:
+Open `http://localhost:3000`.
 
-```bash
-docker compose down
-```
+## Short Run Instructions
+
+1. `cp .env.prod.example .env.prod`
+2. Add API keys in `.env.prod`
+3. `docker compose --env-file .env.prod up -d --build`
+4. Open `http://localhost:3000`

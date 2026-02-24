@@ -239,6 +239,7 @@ export default function Page() {
                 all.map((m) => {
                     if (m.id !== assistantId) return m;
                     const nextBlocks = { ...m.blocks };
+                    let nextOrder = [...m.blockOrder];
                     for (const id of m.blockOrder) {
                         const b = nextBlocks[id];
                         if (!b || b.payload) continue;
@@ -284,7 +285,64 @@ export default function Page() {
                             };
                         }
                     }
-                    return { ...m, blocks: nextBlocks };
+                    const hasKind = (k: string) =>
+                        nextOrder.some((id) => String(nextBlocks[id]?.kind || "") === k);
+                    if (image?.url && imageTs >= minAssetTsMs && !hasKind("image_gen")) {
+                        const id = `recon_image_${imageTs || Date.now()}`;
+                        nextBlocks[id] = {
+                            block_id: id,
+                            title: "Generated Image",
+                            kind: "image_gen",
+                            payload: {
+                                ok: true,
+                                kind: "image_gen",
+                                data: {
+                                    url: image.url,
+                                    filename: image.id || "image.png",
+                                    mime: mimeFromUrl(image.url, "image/png"),
+                                },
+                            },
+                        };
+                        nextOrder = [...nextOrder, id];
+                    }
+                    if (audio?.url && audioTs >= minAssetTsMs && !hasKind("tts")) {
+                        const id = `recon_audio_${audioTs || Date.now()}`;
+                        nextBlocks[id] = {
+                            block_id: id,
+                            title: "Generated Audio",
+                            kind: "tts",
+                            payload: {
+                                ok: true,
+                                kind: "tts",
+                                data: {
+                                    url: audio.url,
+                                    filename: audio.id || "audio.mp3",
+                                    mime: mimeFromUrl(audio.url, "audio/mpeg"),
+                                },
+                            },
+                        };
+                        nextOrder = [...nextOrder, id];
+                    }
+                    if (doc?.url && docTs >= minAssetTsMs && !hasKind("doc")) {
+                        const id = `recon_doc_${docTs || Date.now()}`;
+                        nextBlocks[id] = {
+                            block_id: id,
+                            title: "Generated Document",
+                            kind: "doc",
+                            payload: {
+                                ok: true,
+                                kind: "doc",
+                                data: {
+                                    url: doc.url,
+                                    filename: doc.id || "document",
+                                    text: doc.text || "",
+                                    mime: mimeFromUrl(doc.url, "text/markdown"),
+                                },
+                            },
+                        };
+                        nextOrder = [...nextOrder, id];
+                    }
+                    return { ...m, blocks: nextBlocks, blockOrder: nextOrder };
                 }),
             );
         } catch {
