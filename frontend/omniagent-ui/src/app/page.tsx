@@ -27,6 +27,11 @@ type SessionStateResp = {
         doc?: Artifact | null;
     };
 };
+type ArtifactBaseline = {
+    image?: string;
+    audio?: string;
+    doc?: string;
+};
 
 const SESSION_KEY = "omniagent_session_id";
 const SERVER_BOOT_KEY = "omniagent_server_boot_id";
@@ -67,6 +72,15 @@ function assetTimestampMs(a: Artifact | null | undefined): number {
     const base = url.split("/").pop() || "";
     const urlTs = timestampFromAssetName(base);
     return urlTs || 0;
+}
+
+function artifactIdentity(a: Artifact | null | undefined): string {
+    if (!a) return "";
+    const id = String(a.id || "").trim();
+    if (id) return id;
+    const u = String(a.url || "").trim();
+    if (!u) return "";
+    return u.split("/").pop() || "";
 }
 
 export default function Page() {
@@ -219,7 +233,26 @@ export default function Page() {
         reconcileDeadlineRef.current = 0;
     }
 
-    async function reconcilePendingMediaBlocks(assistantId: string, minAssetTsMs: number = 0) {
+    async function readArtifactBaseline(): Promise<ArtifactBaseline> {
+        if (!sessionId) return {};
+        try {
+            const r = await fetch(
+                `${apiUrl("/api/session/state")}?session_id=${encodeURIComponent(sessionId)}`,
+            );
+            if (!r.ok) return {};
+            const data = (await r.json()) as SessionStateResp;
+            const mem = data.artifact_memory || {};
+            return {
+                image: artifactIdentity(mem.image || null),
+                audio: artifactIdentity(mem.audio || null),
+                doc: artifactIdentity(mem.doc || null),
+            };
+        } catch {
+            return {};
+        }
+    }
+
+    async function reconcilePendingMediaBlocks(assistantId: string, baseline: ArtifactBaseline = {}) {
         if (!sessionId) return;
         try {
             const r = await fetch(
@@ -231,9 +264,22 @@ export default function Page() {
             const image = mem.image || null;
             const audio = mem.audio || null;
             const doc = mem.doc || null;
+            const imageUrl = String(image?.url || "");
+            const audioUrl = String(audio?.url || "");
+            const docUrl = String(doc?.url || "");
+            const imageName = String(image?.id || "image.png");
+            const audioName = String(audio?.id || "audio.mp3");
+            const docName = String(doc?.id || "document");
+            const docText = String(doc?.text || "");
+            const imageId = artifactIdentity(image);
+            const audioId = artifactIdentity(audio);
+            const docId = artifactIdentity(doc);
             const imageTs = assetTimestampMs(image);
             const audioTs = assetTimestampMs(audio);
             const docTs = assetTimestampMs(doc);
+            const imageFresh = Boolean(imageUrl && imageId && imageId !== String(baseline.image || ""));
+            const audioFresh = Boolean(audioUrl && audioId && audioId !== String(baseline.audio || ""));
+            const docFresh = Boolean(docUrl && docId && docId !== String(baseline.doc || ""));
 
             setMessages((all) =>
                 all.map((m) => {
@@ -243,43 +289,43 @@ export default function Page() {
                     for (const id of m.blockOrder) {
                         const b = nextBlocks[id];
                         if (!b || b.payload) continue;
-                        if (b.kind === "image_gen" && image?.url && imageTs >= minAssetTsMs) {
+                        if (b.kind === "image_gen" && imageFresh) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
                                     ok: true,
                                     kind: "image_gen",
                                     data: {
-                                        url: image.url,
-                                        filename: image.id || "image.png",
-                                        mime: mimeFromUrl(image.url, "image/png"),
+                                        url: imageUrl,
+                                        filename: imageName,
+                                        mime: mimeFromUrl(imageUrl, "image/png"),
                                     },
                                 },
                             };
-                        } else if (b.kind === "tts" && audio?.url && audioTs >= minAssetTsMs) {
+                        } else if (b.kind === "tts" && audioFresh) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
                                     ok: true,
                                     kind: "tts",
                                     data: {
-                                        url: audio.url,
-                                        filename: audio.id || "audio.mp3",
-                                        mime: mimeFromUrl(audio.url, "audio/mpeg"),
+                                        url: audioUrl,
+                                        filename: audioName,
+                                        mime: mimeFromUrl(audioUrl, "audio/mpeg"),
                                     },
                                 },
                             };
-                        } else if (b.kind === "doc" && doc?.url && docTs >= minAssetTsMs) {
+                        } else if (b.kind === "doc" && docFresh) {
                             nextBlocks[id] = {
                                 ...b,
                                 payload: {
                                     ok: true,
                                     kind: "doc",
                                     data: {
-                                        url: doc.url,
-                                        filename: doc.id || "document",
-                                        text: doc.text || "",
-                                        mime: mimeFromUrl(doc.url, "text/markdown"),
+                                        url: docUrl,
+                                        filename: docName,
+                                        text: docText,
+                                        mime: mimeFromUrl(docUrl, "text/markdown"),
                                     },
                                 },
                             };
@@ -287,7 +333,7 @@ export default function Page() {
                     }
                     const hasKind = (k: string) =>
                         nextOrder.some((id) => String(nextBlocks[id]?.kind || "") === k);
-                    if (image?.url && imageTs >= minAssetTsMs && !hasKind("image_gen")) {
+                    if (imageFresh && !hasKind("image_gen")) {
                         const id = `recon_image_${imageTs || Date.now()}`;
                         nextBlocks[id] = {
                             block_id: id,
@@ -297,15 +343,15 @@ export default function Page() {
                                 ok: true,
                                 kind: "image_gen",
                                 data: {
-                                    url: image.url,
-                                    filename: image.id || "image.png",
-                                    mime: mimeFromUrl(image.url, "image/png"),
+                                    url: imageUrl,
+                                    filename: imageName,
+                                    mime: mimeFromUrl(imageUrl, "image/png"),
                                 },
                             },
                         };
                         nextOrder = [...nextOrder, id];
                     }
-                    if (audio?.url && audioTs >= minAssetTsMs && !hasKind("tts")) {
+                    if (audioFresh && !hasKind("tts")) {
                         const id = `recon_audio_${audioTs || Date.now()}`;
                         nextBlocks[id] = {
                             block_id: id,
@@ -315,15 +361,15 @@ export default function Page() {
                                 ok: true,
                                 kind: "tts",
                                 data: {
-                                    url: audio.url,
-                                    filename: audio.id || "audio.mp3",
-                                    mime: mimeFromUrl(audio.url, "audio/mpeg"),
+                                    url: audioUrl,
+                                    filename: audioName,
+                                    mime: mimeFromUrl(audioUrl, "audio/mpeg"),
                                 },
                             },
                         };
                         nextOrder = [...nextOrder, id];
                     }
-                    if (doc?.url && docTs >= minAssetTsMs && !hasKind("doc")) {
+                    if (docFresh && !hasKind("doc")) {
                         const id = `recon_doc_${docTs || Date.now()}`;
                         nextBlocks[id] = {
                             block_id: id,
@@ -333,10 +379,10 @@ export default function Page() {
                                 ok: true,
                                 kind: "doc",
                                 data: {
-                                    url: doc.url,
-                                    filename: doc.id || "document",
-                                    text: doc.text || "",
-                                    mime: mimeFromUrl(doc.url, "text/markdown"),
+                                    url: docUrl,
+                                    filename: docName,
+                                    text: docText,
+                                    mime: mimeFromUrl(docUrl, "text/markdown"),
                                 },
                             },
                         };
@@ -350,12 +396,12 @@ export default function Page() {
         }
     }
 
-    function startReconcileWatch(assistantId: string, minAssetTsMs: number) {
+    function startReconcileWatch(assistantId: string, baseline: ArtifactBaseline) {
         stopReconcileWatch();
         reconcileDeadlineRef.current = Date.now() + 30_000;
         reconcileTimerRef.current = window.setInterval(() => {
             void (async () => {
-                await reconcilePendingMediaBlocks(assistantId, minAssetTsMs);
+                await reconcilePendingMediaBlocks(assistantId, baseline);
                 const msg = messagesRef.current.find((m) => m.id === assistantId);
                 if (!msg) {
                     stopReconcileWatch();
@@ -409,7 +455,7 @@ export default function Page() {
         ]);
         setActiveAssistantId(assistantId);
         setInput("");
-        const runStartedAtMs = Date.now();
+        const baseline = await readArtifactBaseline();
 
         try {
             for await (const msg of ssePost(apiUrl("/api/chat/stream"), body)) {
@@ -427,7 +473,7 @@ export default function Page() {
             );
         } finally {
             flushTokenBuffer();
-            await reconcilePendingMediaBlocks(assistantId, runStartedAtMs);
+            await reconcilePendingMediaBlocks(assistantId, baseline);
             const unresolved = messagesRef.current.some((m) => {
                 if (m.id !== assistantId) return false;
                 return m.blockOrder.some((id) => {
@@ -438,9 +484,11 @@ export default function Page() {
             });
             if (unresolved) {
                 // Start post-run recovery only if media blocks are still pending.
-                startReconcileWatch(assistantId, runStartedAtMs);
+                startReconcileWatch(assistantId, baseline);
             } else {
-                stopReconcileWatch();
+                // Keep a short watch even when no pending blocks were seen so missed
+                // block_start/block_end events can still be recovered via session state.
+                startReconcileWatch(assistantId, baseline);
             }
             setActiveAssistantId(null);
             setBusy(false);
