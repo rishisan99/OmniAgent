@@ -1,7 +1,6 @@
 # graph/intent_llm_node.py
 from __future__ import annotations
 import os
-import re
 from typing import Any, Dict
 
 from backend.src.core.jsonx import extract_json
@@ -11,8 +10,8 @@ from backend.src.schemas.plan import RunPlan, TextPlan
 
 
 PLANNER_SYSTEM_PROMPT = (
-    "You are a strict low-latency planner for a multimodal assistant.\n"
-    "Priority: speed, correct tool routing, and valid JSON.\n"
+    "You are an agentic low-latency planner for a multimodal assistant.\n"
+    "Priority: fast but correct routing, minimal unnecessary tools, and valid JSON.\n"
     "Never include prose, markdown, comments, or extra keys.\n"
     "If uncertain, choose text_only with task ['text'].\n"
 )
@@ -37,11 +36,13 @@ def intent_llm_node(provider: str, model: str):
             "- Do NOT infer audio from general explanation requests. Audio requires explicit ask for audio/voice/tts/speak/read aloud.\n"
             "- Do NOT infer image from general explanation requests. Image requires explicit ask to create/generate/make image/photo/picture.\n"
             "- Do NOT infer web/arxiv unless user explicitly asks web/news/internet/search/arxiv/papers/latest/current.\n"
-            "- Use 'arxiv' specifically for paper/preprint/arxiv requests.\n"
+            "- Use 'arxiv' only for explicit research retrieval intent (arxiv/preprint/find papers/research papers).\n"
+            "- Do not confuse subject words with retrieval intent: e.g. 'paper boat image' means image generation, not arxiv.\n"
             "- Use 'rag' only for questions over uploaded files/documents.\n"
             "- Use 'kb_rag' only for organization KB lookup requests (company/employees/products/contracts) when user asks for that data.\n"
             "- If user asks both explanation and a tool action, use text_plus_tools.\n"
             "- For follow-up image edits with previous image context, choose image task.\n"
+            "- Prefer the smallest sufficient toolset; avoid adding speculative retrieval tasks.\n"
             "- No extra keys, no prose.\n"
             "Examples:\n"
             'USER: "hi"\n'
@@ -54,6 +55,10 @@ def intent_llm_node(provider: str, model: str):
             'JSON: {"mode":"tools_only","tasks":["document"],"confidence":0.95,"intent_type":"create"}\n'
             'USER: "latest AI papers from arxiv"\n'
             'JSON: {"mode":"tools_only","tasks":["arxiv"],"confidence":0.92,"intent_type":"retrieve"}\n'
+            'USER: "Generate me a picture of paper boat"\n'
+            'JSON: {"mode":"tools_only","tasks":["image"],"confidence":0.94,"intent_type":"create"}\n'
+            'USER: "Generate me a picture of paper boat and explain origami basics"\n'
+            'JSON: {"mode":"text_plus_tools","tasks":["text","image"],"confidence":0.93,"intent_type":"create"}\n'
             'USER: "write a phoenix story and also generate an image"\n'
             'JSON: {"mode":"text_plus_tools","tasks":["text","image"],"confidence":0.94,"intent_type":"create"}\n'
             f"has_files={has_files}; has_last_image={has_last_image}\n"
@@ -110,70 +115,6 @@ def intent_llm_node(provider: str, model: str):
                 continue
             seen.add(t)
             tasks.append(t)
-
-        # Deterministic cue-based fallback so UI always gets expected text/tool lanes
-        # even if classifier output misses an explicit user ask.
-        text_cues = (
-            "explain",
-            "what is",
-            "what's",
-            "who is",
-            "who's",
-            "how ",
-            "why ",
-            "tell me",
-            "summarize",
-            "summary",
-            "describe",
-            "analysis",
-            "analyze",
-            "write",
-            "story",
-            "?",
-        )
-        greeting_re = re.compile(
-            r"^\s*(hi|hello|hey|yo|sup|good\s+morning|good\s+afternoon|good\s+evening)[!. ]*$",
-            re.IGNORECASE,
-        )
-        explicit_image = any(k in user_l for k in ("generate image", "create image", "make image", "image of", "picture of", "photo of"))
-        explicit_audio = any(k in user_l for k in ("generate audio", "create audio", "make audio", "tts", "voice", "read aloud", "narrate", "speak "))
-        explicit_doc = (
-            any(k in user_l for k in ("pdf", "document", "docx", "text file", "txt", "markdown"))
-            and any(k in user_l for k in ("generate", "create", "make", "write", "export"))
-        )
-        explicit_web = any(k in user_l for k in ("latest", "recent", "news", "headlines", "web", "internet", "search"))
-        explicit_arxiv = any(k in user_l for k in ("arxiv", "paper", "papers", "preprint", "research paper"))
-        explicit_kb = any(
-            k in user_l
-            for k in (
-                "knowledge base",
-                "knowledge-base",
-                "employee",
-                "employees",
-                "company",
-                "contract",
-                "product",
-                "carllm",
-                "homellm",
-                "markellm",
-                "rellm",
-            )
-        )
-        asks_text = bool(greeting_re.match(user)) or any(k in user_l for k in text_cues)
-        if explicit_image and "image" not in tasks:
-            tasks.append("image")
-        if explicit_audio and "audio" not in tasks:
-            tasks.append("audio")
-        if explicit_doc and "document" not in tasks:
-            tasks.append("document")
-        if explicit_arxiv and "arxiv" not in tasks:
-            tasks.append("arxiv")
-        if explicit_web and "web" not in tasks and "arxiv" not in tasks:
-            tasks.append("web")
-        if explicit_kb and "kb_rag" not in tasks:
-            tasks.append("kb_rag")
-        if asks_text and "text" not in tasks:
-            tasks.append("text")
 
         # If a document is already uploaded and user is asking a question about it,
         # route to QA (text + retrieval) instead of document generation/extraction.

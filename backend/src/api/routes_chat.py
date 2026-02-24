@@ -94,6 +94,16 @@ def _likely_tool_turn(text: str, has_attachments: bool) -> bool:
 
 async def _stream_initial_block(send, user_text: str, provider: str, model: str, has_attachments: bool = False) -> None:
     user_l = (user_text or "").lower()
+    def join_actions(items: list[str]) -> str:
+        clean = [re.sub(r"\s+", " ", (x or "").strip()).strip(" ,.;:") for x in items if (x or "").strip()]
+        if not clean:
+            return "handle your request"
+        if len(clean) == 1:
+            return clean[0]
+        if len(clean) == 2:
+            return f"{clean[0]} and {clean[1]}"
+        return ", ".join(clean[:-1]) + f", and {clean[-1]}"
+
     def _clean_db_subject(s: str) -> str:
         out = re.sub(r"\s+", " ", (s or "").strip())
         out = re.sub(r"^(employee|employees|person)\s+", "", out, flags=re.IGNORECASE)
@@ -179,18 +189,23 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
     )
     if has_attachments and has_file_reference:
         scripted = "Analyzing your uploaded file now and preparing the answer."
+    elif parts:
+        scripted = f"Sure, I'll {join_actions(parts)}."
     else:
         scripted = ""
 
     em_provider = os.getenv("INITIAL_PROVIDER", os.getenv("INTENT_PROVIDER", provider))
     em_model = os.getenv("INITIAL_MODEL", os.getenv("INTENT_MODEL", model))
     llm_timeout_sec = float(os.getenv("INITIAL_LLM_TIMEOUT_SEC", "1.2"))
+    actions_hint = f"Detected actions: {join_actions(parts)}\n" if parts else ""
     prompt = (
-        "Write exactly one short plain sentence (8-16 words) acknowledging the user request.\n"
+        "Write exactly one short plain sentence (10-22 words) acknowledging the user request.\n"
+        "Mirror requested actions naturally in one sentence.\n"
         "No markdown, no bullets, no quotes, no prefaces.\n"
         "Do not say you cannot create images/audio/documents.\n"
         "If user asked for generation or retrieval, say you are starting it now.\n"
-        f"USER:\n{user_text}\n"
+        + actions_hint
+        + f"USER:\n{user_text}\n"
     )
     em_text = ""
     send({"type": "block_start", "data": {"block_id": "__meta_initial__", "title": "Initial", "kind": "meta_initial"}})
@@ -208,7 +223,7 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
             if em_text:
                 send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": em_text}})
     except Exception:
-        em_text = "Working on your request now."
+        em_text = scripted or "Sure, I'll handle your request now."
         send({"type": "block_token", "data": {"block_id": "__meta_initial__", "text": em_text}})
     finally:
         send(
@@ -219,7 +234,7 @@ async def _stream_initial_block(send, user_text: str, provider: str, model: str,
                     "payload": {
                         "ok": True,
                         "kind": "meta_initial",
-                        "data": {"text": em_text.strip() or "Working on your request now.", "mime": "text/markdown"},
+                        "data": {"text": em_text.strip() or scripted or "Sure, I'll handle your request now.", "mime": "text/markdown"},
                     },
                 },
             }
