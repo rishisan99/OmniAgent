@@ -9,6 +9,7 @@ export type SSEMessage = {
 export async function* ssePost(
     url: string,
     body: Record<string, unknown>,
+    opts?: { signal?: AbortSignal },
 ): AsyncGenerator<SSEMessage> {
     const res = await fetch(url, {
         method: "POST",
@@ -19,6 +20,7 @@ export async function* ssePost(
         },
         cache: "no-store",
         body: JSON.stringify(body),
+        signal: opts?.signal,
     });
     if (!res.ok || !res.body) throw new Error(`SSE failed: ${res.status}`);
 
@@ -44,4 +46,15 @@ export async function* ssePost(
             yield JSON.parse(json) as SSEMessage;
         }
     }
+
+    // Some proxies may close streams without trailing blank line; parse tail once.
+    const tail = buf.trim();
+    if (!tail) return;
+    const json = tail
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.replace(/^data:\s*/, ""))
+        .join("\n");
+    if (!json) return;
+    yield JSON.parse(json) as SSEMessage;
 }

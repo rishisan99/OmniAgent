@@ -115,6 +115,7 @@ export default function Page() {
     const flushTimerRef = useRef<number | null>(null);
     const reconcileTimerRef = useRef<number | null>(null);
     const reconcileDeadlineRef = useRef<number>(0);
+    const streamAbortTimerRef = useRef<number | null>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
 
     function onChange(p: string, m: string) {
@@ -437,8 +438,6 @@ export default function Page() {
                 }
                 if (!hasPending && hasResolved) {
                     stopReconcileWatch();
-                    setActiveAssistantId((cur) => (cur === assistantId ? null : cur));
-                    setBusy(false);
                     return;
                 }
                 if (Date.now() > reconcileDeadlineRef.current) {
@@ -478,13 +477,26 @@ export default function Page() {
         const baseline = await readArtifactBaseline();
         const expected = expectedMediaFromText(userText);
         const expectsMedia = expected.image || expected.audio || expected.doc;
+        if (expectsMedia) {
+            startReconcileWatch(assistantId, baseline, expected);
+        }
+        const controller = new AbortController();
+        streamAbortTimerRef.current = window.setTimeout(() => {
+            controller.abort("sse-timeout");
+        }, 95_000);
 
         try {
-            for await (const msg of ssePost(apiUrl("/api/chat/stream"), body)) {
+            for await (const msg of ssePost(apiUrl("/api/chat/stream"), body, { signal: controller.signal })) {
                 handle(msg, assistantId);
             }
         } catch (e: unknown) {
             flushTokenBuffer();
+            const aborted =
+                e instanceof DOMException && e.name === "AbortError";
+            if (aborted) {
+                // Stream timeout fallback; reconciliation watcher continues to recover media blocks.
+                return;
+            }
             const err = e instanceof Error ? e.message : String(e);
             setMessages((m) =>
                 m.map((x) =>
@@ -494,6 +506,10 @@ export default function Page() {
                 ),
             );
         } finally {
+            if (streamAbortTimerRef.current !== null) {
+                window.clearTimeout(streamAbortTimerRef.current);
+                streamAbortTimerRef.current = null;
+            }
             flushTokenBuffer();
             await reconcilePendingMediaBlocks(assistantId, baseline, expected);
             const unresolved = messagesRef.current.some((m) => {
@@ -700,6 +716,9 @@ export default function Page() {
         return () => {
             if (flushTimerRef.current !== null) {
                 window.clearTimeout(flushTimerRef.current);
+            }
+            if (streamAbortTimerRef.current !== null) {
+                window.clearTimeout(streamAbortTimerRef.current);
             }
             stopReconcileWatch();
         };
