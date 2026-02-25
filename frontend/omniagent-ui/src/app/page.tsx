@@ -32,6 +32,11 @@ type ArtifactBaseline = {
     audio?: string;
     doc?: string;
 };
+type MediaExpect = {
+    image: boolean;
+    audio: boolean;
+    doc: boolean;
+};
 
 const SESSION_KEY = "omniagent_session_id";
 const SERVER_BOOT_KEY = "omniagent_server_boot_id";
@@ -81,6 +86,16 @@ function artifactIdentity(a: Artifact | null | undefined): string {
     const u = String(a.url || "").trim();
     if (!u) return "";
     return u.split("/").pop() || "";
+}
+
+function expectedMediaFromText(text: string): MediaExpect {
+    const t = (text || "").toLowerCase();
+    const image = /\b(generate|create|make)\b[\s\S]{0,40}\b(image|picture|photo)\b/.test(t)
+        || /\b(image|picture|photo)\s+of\b/.test(t);
+    const audio = /\b(generate|create|make)\b[\s\S]{0,40}\b(audio|voice|tts)\b/.test(t)
+        || /\b(read aloud|narrate|speak)\b/.test(t);
+    const doc = /\b(generate|create|make|write|export)\b[\s\S]{0,40}\b(pdf|document|docx|text file|txt|markdown)\b/.test(t);
+    return { image, audio, doc };
 }
 
 export default function Page() {
@@ -252,7 +267,11 @@ export default function Page() {
         }
     }
 
-    async function reconcilePendingMediaBlocks(assistantId: string, baseline: ArtifactBaseline = {}) {
+    async function reconcilePendingMediaBlocks(
+        assistantId: string,
+        baseline: ArtifactBaseline = {},
+        expected: MediaExpect = { image: true, audio: true, doc: true },
+    ) {
         if (!sessionId) return;
         try {
             const r = await fetch(
@@ -277,9 +296,9 @@ export default function Page() {
             const imageTs = assetTimestampMs(image);
             const audioTs = assetTimestampMs(audio);
             const docTs = assetTimestampMs(doc);
-            const imageFresh = Boolean(imageUrl && imageId && imageId !== String(baseline.image || ""));
-            const audioFresh = Boolean(audioUrl && audioId && audioId !== String(baseline.audio || ""));
-            const docFresh = Boolean(docUrl && docId && docId !== String(baseline.doc || ""));
+            const imageFresh = expected.image && Boolean(imageUrl && imageId && imageId !== String(baseline.image || ""));
+            const audioFresh = expected.audio && Boolean(audioUrl && audioId && audioId !== String(baseline.audio || ""));
+            const docFresh = expected.doc && Boolean(docUrl && docId && docId !== String(baseline.doc || ""));
 
             setMessages((all) =>
                 all.map((m) => {
@@ -396,12 +415,12 @@ export default function Page() {
         }
     }
 
-    function startReconcileWatch(assistantId: string, baseline: ArtifactBaseline) {
+    function startReconcileWatch(assistantId: string, baseline: ArtifactBaseline, expected: MediaExpect) {
         stopReconcileWatch();
         reconcileDeadlineRef.current = Date.now() + 30_000;
         reconcileTimerRef.current = window.setInterval(() => {
             void (async () => {
-                await reconcilePendingMediaBlocks(assistantId, baseline);
+                await reconcilePendingMediaBlocks(assistantId, baseline, expected);
                 const msg = messagesRef.current.find((m) => m.id === assistantId);
                 if (!msg) {
                     stopReconcileWatch();
@@ -432,6 +451,7 @@ export default function Page() {
     async function send() {
         if (!sessionId || !input.trim() || busy) return;
         const userText = input.trim();
+        stopReconcileWatch();
         setBusy(true);
         const body = { session_id: sessionId, provider, model, text: userText };
         const userId = `m_${Date.now().toString(16)}_u`;
@@ -456,6 +476,8 @@ export default function Page() {
         setActiveAssistantId(assistantId);
         setInput("");
         const baseline = await readArtifactBaseline();
+        const expected = expectedMediaFromText(userText);
+        const expectsMedia = expected.image || expected.audio || expected.doc;
 
         try {
             for await (const msg of ssePost(apiUrl("/api/chat/stream"), body)) {
@@ -473,7 +495,7 @@ export default function Page() {
             );
         } finally {
             flushTokenBuffer();
-            await reconcilePendingMediaBlocks(assistantId, baseline);
+            await reconcilePendingMediaBlocks(assistantId, baseline, expected);
             const unresolved = messagesRef.current.some((m) => {
                 if (m.id !== assistantId) return false;
                 return m.blockOrder.some((id) => {
@@ -484,11 +506,11 @@ export default function Page() {
             });
             if (unresolved) {
                 // Start post-run recovery only if media blocks are still pending.
-                startReconcileWatch(assistantId, baseline);
-            } else {
-                // Keep a short watch even when no pending blocks were seen so missed
-                // block_start/block_end events can still be recovered via session state.
-                startReconcileWatch(assistantId, baseline);
+                startReconcileWatch(assistantId, baseline, expected);
+            } else if (expectsMedia) {
+                // For media-intent turns, keep short recovery polling in case stream
+                // dropped block events; scope it to expected media kinds only.
+                startReconcileWatch(assistantId, baseline, expected);
             }
             setActiveAssistantId(null);
             setBusy(false);
