@@ -82,6 +82,32 @@ def _is_news_query(text: str) -> bool:
     return any(k in t for k in ("news", "headline", "headlines", "latest", "recent", "today", "update"))
 
 
+def _is_weak_pronoun_subject(s: str) -> bool:
+    t = (s or "").strip().lower()
+    return t in {"it", "this", "that", "this one", "that one", "same"}
+
+
+def _subject_from_recent_history(history: List[Dict[str, Any]]) -> str:
+    # Prefer recent user turns that likely contain an entity/topic mention.
+    pats = [
+        r"(?:explain|tell me about|describe|summarize|what is|who is)\s+(.+?)\s*$",
+        r"(?:about)\s+(.+?)\s*$",
+    ]
+    for m in reversed(history or []):
+        if str(m.get("role", "")).lower() != "user":
+            continue
+        text = str(m.get("content", "")).strip()
+        if not text:
+            continue
+        for p in pats:
+            mm = re.search(p, text, flags=re.IGNORECASE)
+            if mm:
+                cand = _clean_clause(mm.group(1))
+                if cand and not _is_weak_pronoun_subject(cand):
+                    return cand
+    return ""
+
+
 def tool_router_node():
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
         plan = RunPlan.model_validate(state["plan"])
@@ -93,6 +119,7 @@ def tool_router_node():
         intent = state.get("intent") or {}
         runtime = state.get("plan_runtime") or {}
         linked = state.get("linked_artifact") or {}
+        history = list(state.get("chat_history") or [])
         last_image_prompt = (state.get("last_image_prompt") or "").strip()
 
         if flags.get("needs_web"):
@@ -112,6 +139,7 @@ def tool_router_node():
             tasks.append({"id": str(uuid4())[:8], "kind": "kb_rag", "query": user_text, "top_k": 6})
 
         image_edit_cues = (
+            "edit ",
             "add ",
             "replace ",
             "change ",
@@ -123,10 +151,11 @@ def tool_router_node():
             "background",
         )
         linked_prompt = (linked.get("prompt") or "").strip() if linked.get("kind") == "image" else ""
+        explicit_edit_requested = any(c in user_l for c in image_edit_cues)
         wants_image_edit = (
-            (intent.get("intent_type") == "edit" and intent.get("target_modality") == "image")
-            or (bool(linked_prompt) and any(c in user_l for c in image_edit_cues))
-            or (bool(last_image_prompt) and any(c in user_l for c in image_edit_cues))
+            # Use image memory only when user explicitly asks to edit/modify.
+            (bool(linked_prompt) and explicit_edit_requested)
+            or (bool(last_image_prompt) and explicit_edit_requested)
         )
         if flags.get("needs_image_gen") or wants_image_edit:
             prompt = _find_clause(
@@ -147,6 +176,10 @@ def tool_router_node():
                     ],
                 )
             )
+            if _is_weak_pronoun_subject(prompt):
+                hist_subject = _subject_from_recent_history(history)
+                if hist_subject:
+                    prompt = hist_subject
             if wants_image_edit:
                 base_prompt = linked_prompt or last_image_prompt
                 prompt = (
