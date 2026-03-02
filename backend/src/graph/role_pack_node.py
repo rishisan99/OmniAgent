@@ -16,7 +16,7 @@ PLANNER_SYSTEM_PROMPT = (
 
 def role_pack_node(provider: str, model: str):
     def _run(state: Dict[str, Any]) -> Dict[str, Any]:
-        user = str(state.get("user_text", "")).strip()
+        user = str(state.get("text_query") or state.get("user_text", "")).strip()
         tasks = [str(t.get("kind")) for t in state.get("tasks", []) if isinstance(t, dict)]
         intent = state.get("intent") or {}
         contract = dict(state.get("response_contract") or {})

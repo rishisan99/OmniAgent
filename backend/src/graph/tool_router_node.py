@@ -12,13 +12,14 @@ def _extract_quoted(text: str) -> str:
     s = (text or "").strip()
     if not s:
         return s
-    for q in ('"', "'"):
-        i = s.find(q)
-        j = s.rfind(q)
-        if i != -1 and j != -1 and j > i:
-            inner = s[i + 1 : j].strip()
-            if inner:
-                return inner
+    # Prefer the first properly paired quoted segment to avoid spanning
+    # across unrelated quoted clauses in multi-action prompts.
+    m = re.search(r'"([^"\n]+)"', s)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    m = re.search(r"'([^'\n]+)'", s)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
     return s
 
 
@@ -31,7 +32,11 @@ def _strip_prefixes(text: str, prefixes: List[str]) -> str:
     return s
 
 
-_NEXT_ACTION = r"(?=(?:\s*,|\s+and\s+|\s+also\s+|\s+then\s+)\s*(?:generate|create|make|explain|tell|write|summarize|what is)\b|$)"
+_NEXT_ACTION = (
+    r"(?=(?:\s*,|\s+and\s+|\s+also\s+|\s+then\s+)\s*"
+    r"(?:generate|create|make|explain|tell|write|summarize|what is|"
+    r"audio|voice|tts|image|picture|photo|pdf|document|docx?|txt|text file|doc)\b|$)"
+)
 
 
 def _clean_clause(s: str) -> str:
@@ -54,8 +59,11 @@ def _remove_tool_clauses(text: str) -> str:
     s = text
     patterns = [
         r"(?:generate|create|make)\s+(?:an?\s+)?(?:image|picture|photo)(?:\s+for|\s+of)?\s+.+?" + _NEXT_ACTION,
+        r"(?:image|picture|photo)\s+(?:for|of)\s+.+?" + _NEXT_ACTION,
         r"(?:generate|create|make)\s+audio(?:\s+for|\s+saying|\s+of)?\s+.+?" + _NEXT_ACTION,
+        r"(?:audio|voice|tts)\s+(?:for|of)\s+.+?" + _NEXT_ACTION,
         r"(?:generate|create|make)\s+(?:an?\s+)?(?:pdf|document|docx?|txt|text file)(?:\s+on|\s+about|\s+for)?\s+.+?" + _NEXT_ACTION,
+        r"(?:pdf|document|docx?|txt|text file|doc)\s+(?:on|about|for)\s+.+?" + _NEXT_ACTION,
     ]
     for p in patterns:
         s = re.sub(p, " ", s, flags=re.IGNORECASE)
@@ -176,6 +184,16 @@ def tool_router_node():
                     ],
                 )
             )
+            if prompt and ('"' in prompt or "'" in prompt):
+                quoted = _extract_quoted(prompt)
+                if quoted and quoted != prompt:
+                    prompt = quoted
+                else:
+                    if prompt.count('"') == 1:
+                        prompt = prompt.replace('"', "")
+                    if prompt.count("'") == 1:
+                        prompt = prompt.replace("'", "")
+                    prompt = _clean_clause(prompt)
             if _is_weak_pronoun_subject(prompt):
                 hist_subject = _subject_from_recent_history(history)
                 if hist_subject:
@@ -187,6 +205,8 @@ def tool_router_node():
                     f"Apply this edit request: {user_text}\n"
                     "Keep the same main subject unless the user explicitly changes it."
                 )
+            else:
+                prompt = re.sub(r"^(?:an?\s+)+", "", (prompt or "").strip(), flags=re.IGNORECASE).strip()
             tasks.append(
                 {
                     "id": str(uuid4())[:8],
@@ -205,6 +225,7 @@ def tool_router_node():
                 user_text,
                 [
                     r"(?:generate|create|make)\s+audio(?:\s+for|\s+saying|\s+of)?\s+(.+?)" + _NEXT_ACTION,
+                    r"(?:audio|voice|tts)\s+for\s+(.+?)" + _NEXT_ACTION,
                     r"(?:say|speak)\s+(.+?)" + _NEXT_ACTION,
                 ],
             ) or _extract_quoted(
